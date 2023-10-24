@@ -67,9 +67,6 @@ def main():
         strategy = 'ddp_find_unused_parameters_true'
         num_nodes = int(os.environ['SLURM_NNODES'])
         devices = int(os.environ['SLURM_NTASKS'])
-        plugins.append(
-            SLURMEnvironment(requeue_signal=signal.SIGHUP)
-        )
         print(f'Running on slurm, {num_nodes} nodes, {devices} gpus')
     else:
         strategy = 'auto'
