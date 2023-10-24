@@ -2,8 +2,8 @@ import abc
 import sys
 from argparse import ArgumentParser
 
-from pytorch_lightning import LightningDataModule
-from pytorch_lightning.utilities.types import TRAIN_DATALOADERS, EVAL_DATALOADERS
+from lightning import LightningDataModule
+from lightning.pytorch.utilities.types import TRAIN_DATALOADERS, EVAL_DATALOADERS
 from torch.utils.data import RandomSampler, DataLoader
 
 

@@ -2,7 +2,7 @@ from abc import ABC
 from typing import Any, Optional
 
 import torchmetrics
-from pytorch_lightning import LightningModule
+from lightning import LightningModule
 from torch.optim import AdamW
 
 from architectures.utils import MaeScheduler, MetricMixin

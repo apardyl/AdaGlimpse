@@ -7,10 +7,10 @@ import sys
 import time
 
 import torch
+from lightning import Trainer
+from lightning.pytorch.callbacks import ModelCheckpoint, RichProgressBar, RichModelSummary
+from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
 from lightning_fabric.plugins.environments import SLURMEnvironment
-from pytorch_lightning import Trainer
-from pytorch_lightning.callbacks import ModelCheckpoint, RichProgressBar, RichModelSummary
-from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
 
 from utils.prepare import experiment_from_args
 

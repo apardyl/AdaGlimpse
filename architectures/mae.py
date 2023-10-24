@@ -14,7 +14,6 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
-from timm.layers import DropPath
 
 from architectures.mae_utils import get_2d_sincos_pos_embed, PatchEmbedElastic, \
     get_2dplus_sincos_pos_embed_coords, Layer_scale_init_Block

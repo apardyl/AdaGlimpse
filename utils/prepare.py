@@ -1,7 +1,7 @@
 import argparse
 import inspect
 
-import pytorch_lightning
+import lightning
 
 import architectures
 import datasets
@@ -14,9 +14,9 @@ def experiment_from_args(argv, prog_name='TrainWhereToLookNext',
     )
 
     archs = {k: v for k, v in inspect.getmembers(architectures, inspect.isclass) if
-             issubclass(v, pytorch_lightning.LightningModule) and not inspect.isabstract(v)}
+             issubclass(v, lightning.LightningModule) and not inspect.isabstract(v)}
     dss = {k: v for k, v in inspect.getmembers(datasets, inspect.isclass) if
-           issubclass(v, pytorch_lightning.LightningDataModule) and not inspect.isabstract(
+           issubclass(v, lightning.LightningDataModule) and not inspect.isabstract(
                v) and k != 'LightningDataModule'}
 
     parser.add_argument('dataset', help='Dataset to use', choices=dss.keys())

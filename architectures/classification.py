@@ -1,14 +1,12 @@
 from functools import partial
-from typing import Any, Dict
+from typing import Dict
 
 import torch
 import torchmetrics
 from torch import nn
 
-from architectures.base import BaseArchitecture
 from architectures.glimpse_mae import BaseGlimpseMae
 from architectures.glimpse_selectors import RandomGlimpseSelector, CheckerboardGlimpseSelector, AttentionGlimpseSelector
-from datasets.base import BaseDataModule
 from datasets.classification import BaseClassificationDataModule
 
 

@@ -6,7 +6,7 @@ from typing import Optional
 
 import torch
 from PIL import Image
-from pytorch_lightning.utilities.types import EVAL_DATALOADERS, TRAIN_DATALOADERS
+from lightning.pytorch.utilities.types import TRAIN_DATALOADERS, EVAL_DATALOADERS
 from torch.utils.data import RandomSampler
 from torchvision.datasets import ImageNet
 
