@@ -64,7 +64,7 @@ def main():
     ]
 
     if 'SLURM_NTASKS' in os.environ:
-        strategy = 'ddp'
+        strategy = 'ddp_find_unused_parameters_true'
         num_nodes = int(os.environ['SLURM_NNODES'])
         devices = int(os.environ['SLURM_NTASKS'])
         callbacks.append(
