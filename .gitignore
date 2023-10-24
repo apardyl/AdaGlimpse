@@ -3,3 +3,7 @@
 imnet_resnet50_scratch/timm_temp/
 .dumbo.json
 checkpoints/
+.ipynb_checkpoints/
+.idea/
+logs/
+*.pth
