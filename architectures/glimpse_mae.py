@@ -9,7 +9,6 @@ import torch
 
 from architectures.base import BaseArchitecture
 from architectures.mae import mae_vit_large_patch16
-from architectures.retinalize import Retinalizer
 from architectures.utils import dict_to_cpu
 from datasets.base import BaseDataModule
 from datasets.segmentation import BaseSegmentationDataModule

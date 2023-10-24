@@ -1,15 +1,16 @@
 import argparse
+import os
 import platform
 import random
+import signal
 import sys
 import time
 
 import torch
+from lightning_fabric.plugins.environments import SLURMEnvironment
 from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint, RichProgressBar, RichModelSummary
 from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
-from pytorch_lightning.strategies import DDPStrategy
-from torch.cuda.amp import GradScaler
 
 from utils.prepare import experiment_from_args
 
@@ -30,11 +31,6 @@ def define_args(parent_parser):
                         action=argparse.BooleanOptionalAction)
     parser.add_argument('--tensorboard',
                         help='log to tensorboard',
-                        type=bool,
-                        default=False,
-                        action=argparse.BooleanOptionalAction)
-    parser.add_argument('--ddp',
-                        help='use DDP acceleration strategy',
                         type=bool,
                         default=False,
                         action=argparse.BooleanOptionalAction)
@@ -61,12 +57,35 @@ def main():
     if args.wandb:
         loggers.append(WandbLogger(project='elastic_glimpse', entity="ideas_cv", name=run_name))
 
-    checkpoint_callback = ModelCheckpoint(dirpath=f"checkpoints/{run_name}", monitor="val/loss")
+    callbacks = [
+        ModelCheckpoint(dirpath=f"checkpoints/{run_name}", monitor="val/loss"),
+        RichProgressBar(leave=True),
+        RichModelSummary(max_depth=3)
+    ]
 
-    trainer = Trainer(plugins=plugins, max_epochs=args.epochs, accelerator='auto', logger=loggers,
-                      callbacks=[checkpoint_callback, RichProgressBar(leave=True), RichModelSummary(max_depth=3)],
+    if 'SLURM_NTASKS' in os.environ:
+        strategy = 'ddp'
+        num_nodes = int(os.environ['SLURM_NNODES'])
+        devices = int(os.environ['SLURM_NTASKS'])
+        callbacks.append(
+            SLURMEnvironment(requeue_signal=signal.SIGHUP)
+        )
+        print(f'Running on slurm, {num_nodes} nodes, {devices} gpus')
+    else:
+        strategy = 'auto'
+        num_nodes = 1
+        devices = 'auto'
+
+    trainer = Trainer(plugins=plugins,
+                      max_epochs=args.epochs,
+                      accelerator='gpu',
+                      logger=loggers,
+                      callbacks=callbacks,
                       enable_model_summary=False,
-                      strategy=DDPStrategy(find_unused_parameters=False) if args.ddp else 'auto')
+                      strategy=strategy,
+                      num_nodes=num_nodes,
+                      devices=devices
+                      )
 
     trainer.fit(model=model, datamodule=data_module, ckpt_path=args.load_model_path)
 

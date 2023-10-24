@@ -32,7 +32,7 @@ class BaseArchitecture(LightningModule, MetricMixin, ABC):
         parser.add_argument('--lr',
                             help='learning-rate',
                             type=float,
-                            default=1.5e-4)
+                            default=1e-3)
         parser.add_argument('--warmup-epochs',
                             help='epochs to warmup LR',
                             type=int,
@@ -44,11 +44,11 @@ class BaseArchitecture(LightningModule, MetricMixin, ABC):
         parser.add_argument('--weight-decay',
                             help='weight_decay',
                             type=float,
-                            default=0)
+                            default=0.01)
         parser.add_argument('--epochs',
                             help='number of epochs',
                             type=int,
-                            default=100)
+                            default=400)
         return parent_parser
 
     def configure_optimizers(self):

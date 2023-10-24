@@ -1,1 +1,1 @@
-from .elastic import ElasticImageNet1kClassification
+from .elastic import ElasticImageNet1k
