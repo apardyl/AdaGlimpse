@@ -52,8 +52,10 @@ class SaliencyPredictor(BaseArchitecture):
         patches = batch['patches']
         coords = batch['coords']
 
-        teacher_out = self.teacher.forward_head(self.teacher.forward_encoder(image))
-        saliency = self.teacher.encoder_attention_rollout().detach()
+        self.teacher.eval()
+        with torch.no_grad():
+            teacher_out = self.teacher.forward_head(self.teacher.forward_encoder(image))
+            saliency = self.teacher.encoder_attention_rollout().detach()
 
         pred = self.predictor.forward_head(self.predictor.forward_encoder(patches, coords=coords))
 

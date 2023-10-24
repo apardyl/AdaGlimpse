@@ -16,6 +16,7 @@ from utils.prepare import experiment_from_args
 
 random.seed(1)
 torch.manual_seed(1)
+torch.set_float32_matmul_precision('high')
 
 
 def define_args(parent_parser):
@@ -33,6 +34,11 @@ def define_args(parent_parser):
                         help='log to tensorboard',
                         type=bool,
                         default=False,
+                        action=argparse.BooleanOptionalAction)
+    parser.add_argument('--fp16',
+                        help='use 16 bit precision',
+                        type=bool,
+                        default=True,
                         action=argparse.BooleanOptionalAction)
     parser.add_argument('--name',
                         help='experiment name',
@@ -81,7 +87,8 @@ def main():
                       enable_model_summary=False,
                       strategy=strategy,
                       num_nodes=num_nodes,
-                      devices=devices
+                      devices=devices,
+                      precision=16 if args.fp16 else None
                       )
 
     trainer.fit(model=model, datamodule=data_module, ckpt_path=args.load_model_path)
