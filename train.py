@@ -10,7 +10,7 @@ import torch
 from lightning import Trainer
 from lightning.pytorch.callbacks import ModelCheckpoint, RichProgressBar, RichModelSummary
 from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
-from lightning_fabric.plugins.environments import SLURMEnvironment
+from lightning.pytorch.plugins.environments import SLURMEnvironment
 
 from utils.prepare import experiment_from_args
 
