@@ -70,9 +70,9 @@ def main():
     ]
 
     if 'SLURM_NTASKS' in os.environ:
-        strategy = 'ddp_find_unused_parameters_true'
         num_nodes = int(os.environ['SLURM_NNODES'])
         devices = int(os.environ['SLURM_NTASKS'])
+        strategy = 'ddp_find_unused_parameters_true' if (num_nodes * devices > 1) else 'auto'
         print(f'Running on slurm, {num_nodes} nodes, {devices} gpus')
     else:
         strategy = 'auto'
