@@ -5,12 +5,12 @@ import torchmetrics
 from lightning import LightningModule
 from torch.optim import AdamW
 
-from architectures.utils import MaeScheduler, MetricMixin
+from architectures.utils import MaeScheduler
 from datasets.base import BaseDataModule
 
 
 # noinspection PyArgumentList
-class BaseArchitecture(LightningModule, MetricMixin, ABC):
+class BaseArchitecture(LightningModule, ABC):
     def __init__(self, datamodule: BaseDataModule, lr=1.5e-4, min_lr=1e-8, warmup_epochs=10, weight_decay=0,
                  epochs=100, **_):
         super().__init__()
@@ -23,8 +23,6 @@ class BaseArchitecture(LightningModule, MetricMixin, ABC):
         self.current_lr = lr
 
         self.save_hyperparameters(ignore=['datamodule'])
-
-        self.define_metric('loss', torchmetrics.MeanMetric)
 
     @classmethod
     def add_argparse_args(cls, parent_parser):
@@ -79,17 +77,17 @@ class BaseArchitecture(LightningModule, MetricMixin, ABC):
     def training_step(self, batch, batch_idx):
         out = self.forward(batch)
         loss = out['loss']
-        self.log_metric('train', 'loss', loss, on_step=True, on_epoch=False, sync_dist=False)
-        self.log('train/lr', self.current_lr, on_step=False, on_epoch=True, sync_dist=True)
+        self.log('train/loss', loss, on_step=True, on_epoch=False, sync_dist=False)
+        self.log('train/lr', self.current_lr, on_step=False, on_epoch=True, sync_dist=False)
         self.do_metrics('train', out, batch)
         return loss
 
     def validation_step(self, batch, batch_idx):
         out = self.forward(batch)
-        self.log_metric('val', 'loss', out['loss'])
+        self.log('val/loss', out['loss'], on_step=False, on_epoch=True, sync_dist=True)
         self.do_metrics('val', out, batch)
 
     def test_step(self, batch, batch_idx):
         out = self.forward(batch)
-        self.log_metric('test', 'loss', out['loss'])
+        self.log('test/loss', out['loss'], on_step=False, on_epoch=True, sync_dist=True)
         self.do_metrics('test', out, batch)
