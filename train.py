@@ -1,8 +1,8 @@
 import argparse
+import datetime
 import os
 import platform
 import random
-import signal
 import sys
 import time
 
@@ -10,7 +10,7 @@ import torch
 from lightning import Trainer
 from lightning.pytorch.callbacks import ModelCheckpoint, RichProgressBar, RichModelSummary
 from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
-from lightning.pytorch.plugins.environments import SLURMEnvironment
+from lightning.pytorch.strategies import DDPStrategy
 
 from utils.prepare import experiment_from_args
 
@@ -37,6 +37,11 @@ def define_args(parent_parser):
                         action=argparse.BooleanOptionalAction)
     parser.add_argument('--fp16',
                         help='use 16 bit precision',
+                        type=bool,
+                        default=True,
+                        action=argparse.BooleanOptionalAction)
+    parser.add_argument('--compile',
+                        help='use torch compile',
                         type=bool,
                         default=True,
                         action=argparse.BooleanOptionalAction)
@@ -72,12 +77,18 @@ def main():
     if 'SLURM_NTASKS' in os.environ:
         num_nodes = int(os.environ['SLURM_NNODES'])
         devices = int(os.environ['SLURM_NTASKS'])
-        strategy = 'ddp_find_unused_parameters_true' if (num_nodes * devices > 1) else 'auto'
+        if num_nodes * devices > 1:
+            strategy = DDPStrategy(find_unused_parameters=True, timeout=datetime.timedelta(seconds=3600))
+        else:
+            strategy = 'auto'
         print(f'Running on slurm, {num_nodes} nodes, {devices} gpus')
     else:
         strategy = 'auto'
         num_nodes = 1
         devices = 'auto'
+
+    if args.compile:
+        model = torch.compile(model)
 
     trainer = Trainer(plugins=plugins,
                       max_epochs=args.epochs,
@@ -92,7 +103,6 @@ def main():
                       )
 
     trainer.fit(model=model, datamodule=data_module, ckpt_path=args.load_model_path)
-
     if data_module.has_test_data:
         trainer.test(ckpt_path='best', datamodule=data_module)
 
