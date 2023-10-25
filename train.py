@@ -99,7 +99,7 @@ def main():
                       strategy=strategy,
                       num_nodes=num_nodes,
                       devices=devices,
-                      precision=16 if args.fp16 else None
+                      precision='16-mixed' if args.fp16 else None
                       )
 
     trainer.fit(model=model, datamodule=data_module, ckpt_path=args.load_model_path)
