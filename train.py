@@ -21,10 +21,6 @@ torch.set_float32_matmul_precision('high')
 
 def define_args(parent_parser):
     parser = parent_parser.add_argument_group('train.py')
-    parser.add_argument('--load-model-path',
-                        help='load model from pth',
-                        type=str,
-                        default=None)
     parser.add_argument('--wandb',
                         help='log to wandb',
                         type=bool,
@@ -37,11 +33,6 @@ def define_args(parent_parser):
                         action=argparse.BooleanOptionalAction)
     parser.add_argument('--fp16',
                         help='use 16 bit precision',
-                        type=bool,
-                        default=True,
-                        action=argparse.BooleanOptionalAction)
-    parser.add_argument('--compile',
-                        help='use torch compile',
                         type=bool,
                         default=True,
                         action=argparse.BooleanOptionalAction)
@@ -87,9 +78,6 @@ def main():
         num_nodes = 1
         devices = 'auto'
 
-    if args.compile:
-        model = torch.compile(model)
-
     trainer = Trainer(plugins=plugins,
                       max_epochs=args.epochs,
                       accelerator='gpu',
@@ -99,10 +87,12 @@ def main():
                       strategy=strategy,
                       num_nodes=num_nodes,
                       devices=devices,
-                      precision='16-mixed' if args.fp16 else None
+                      precision='16-mixed' if args.fp16 else None,
+                      benchmark=True,
+                      check_val_every_n_epoch=2
                       )
 
-    trainer.fit(model=model, datamodule=data_module, ckpt_path=args.load_model_path)
+    trainer.fit(model=model, datamodule=data_module)
     if data_module.has_test_data:
         trainer.test(ckpt_path='best', datamodule=data_module)
 

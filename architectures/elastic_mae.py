@@ -19,6 +19,9 @@ class ElasticMae(BaseArchitecture, ABC):
         if pretrained_path:
             print(self.load_pretrained_elastic(pretrained_path), file=sys.stderr)
 
+        if self.compile_model:
+            self.mae = torch.compile(self.mae, mode='reduce-overhead')
+
         self.debug = False
 
     @classmethod

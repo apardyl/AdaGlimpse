@@ -4,7 +4,6 @@ import torch
 
 from architectures.base import BaseArchitecture
 from architectures.mae import mae_vit_base_patch16
-from datasets import ElasticImageNet1k
 from datasets.base import BaseDataModule
 
 
@@ -19,6 +18,10 @@ class SaliencyPredictor(BaseArchitecture):
 
         if pretrained_path:
             print(self.load_pretrained_elastic(pretrained_path), file=sys.stderr)
+
+        if self.compile_model:
+            self.predictor = torch.compile(self.predictor, mode='reduce-overhead')
+            self.teacher = torch.compile(self.teacher, mode='reduce-overhead')
 
     @classmethod
     def add_argparse_args(cls, parent_parser):
@@ -67,16 +70,3 @@ class SaliencyPredictor(BaseArchitecture):
             'out': pred,
             'loss': loss
         }
-
-
-if __name__ == '__main__':
-    data = ElasticImageNet1k(data_dir='/home/adam/datasets/imagenet', train_batch_size=2, eval_batch_size=2)
-    data.setup('fit')
-    model = SaliencyPredictor(datamodule=data, teacher_path='../deit_3_base_224_1k.pth',
-                              pretrained_path='../elastic-224-30random70grid.pth')
-    loader = data.val_dataloader()
-    batch = next(iter(loader))
-
-    out = model(batch)
-
-    print(out)

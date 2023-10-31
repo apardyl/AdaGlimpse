@@ -1,3 +1,4 @@
+import argparse
 from abc import ABC
 from typing import Any, Optional
 
@@ -12,15 +13,15 @@ from datasets.base import BaseDataModule
 # noinspection PyArgumentList
 class BaseArchitecture(LightningModule, ABC):
     def __init__(self, datamodule: BaseDataModule, lr=1.5e-4, min_lr=1e-8, warmup_epochs=10, weight_decay=0,
-                 epochs=100, **_):
+                 epochs=100, compile_model=True, **_):
         super().__init__()
-
         self.lr = lr
         self.min_lr = min_lr
         self.warmup_epochs = warmup_epochs
         self.weight_decay = weight_decay
         self.epochs = epochs
         self.current_lr = lr
+        self.compile_model = compile_model
 
         self.save_hyperparameters(ignore=['datamodule'])
 
@@ -47,6 +48,11 @@ class BaseArchitecture(LightningModule, ABC):
                             help='number of epochs',
                             type=int,
                             default=400)
+        parser.add_argument('--compile-model',
+                            help='use torch compile',
+                            type=bool,
+                            default=True,
+                            action=argparse.BooleanOptionalAction)
         return parent_parser
 
     def configure_optimizers(self):

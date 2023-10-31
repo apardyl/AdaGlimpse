@@ -1,6 +1,5 @@
 import abc
 import os
-import sys
 from collections import Counter
 from typing import Optional
 
@@ -49,15 +48,15 @@ class BaseClassificationDataModule(BaseDataModule, abc.ABC):
         return self.cls_num_classes
 
     def train_dataloader(self) -> TRAIN_DATALOADERS:
-        print(f'Train class statistics:', self.train_dataset.class_stats(), file=sys.stderr)
+        # print(f'Train class statistics:', self.train_dataset.class_stats(), file=sys.stderr)
         return super().train_dataloader()
 
     def test_dataloader(self) -> EVAL_DATALOADERS:
-        print(f'Test class statistics:', self.test_dataset.class_stats(), file=sys.stderr)
+        # print(f'Test class statistics:', self.test_dataset.class_stats(), file=sys.stderr)
         return super().test_dataloader()
 
     def val_dataloader(self) -> EVAL_DATALOADERS:
-        print(f'Val class statistics:', self.val_dataset.class_stats(), file=sys.stderr)
+        # print(f'Val class statistics:', self.val_dataset.class_stats(), file=sys.stderr)
         return super().val_dataloader()
 
 
