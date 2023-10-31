@@ -78,6 +78,13 @@ def main():
         num_nodes = 1
         devices = 'auto'
 
+    if not args.fp16:
+        precision = None
+    elif torch.cuda.is_bf16_supported():
+        precision = 'bf16-mixed'
+    else:
+        precision = '16-mixed'
+
     trainer = Trainer(plugins=plugins,
                       max_epochs=args.epochs,
                       accelerator='gpu',
@@ -87,7 +94,7 @@ def main():
                       strategy=strategy,
                       num_nodes=num_nodes,
                       devices=devices,
-                      precision='16-mixed' if args.fp16 else None,
+                      precision=precision,
                       benchmark=True,
                       check_val_every_n_epoch=2
                       )
