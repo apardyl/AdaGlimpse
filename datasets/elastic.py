@@ -1,5 +1,6 @@
 import argparse
 import os
+import sys
 from argparse import ArgumentParser
 from typing import Optional, Any, Dict
 
@@ -41,7 +42,14 @@ class ElasticImageNet1k(BaseClassificationDataModule):
 
     def __init__(self, *args, in_mem=False, **kwargs):
         super().__init__(*args, **kwargs)
+
         self.in_mem = in_mem
+        self.disk_dir = self.data_dir
+        if self.in_mem:
+            memfs_path = os.environ['MEMFS']
+            print('using memfs at:', memfs_path, file=sys.stderr)
+            self.data_dir = os.path.join(memfs_path, 'imagenet')
+        self.prepare_data_per_node = True
 
         self.patch_sampler = RandomUniformSampler(random_patches=49, min_patch_size=16, max_patch_size=48)
 
@@ -72,18 +80,11 @@ class ElasticImageNet1k(BaseClassificationDataModule):
 
     def prepare_data(self) -> None:
         if self.in_mem:
-            tar_path = self.data_dir
-            memfs_path = os.environ['MEMFS']
-            print('using memfs at:', memfs_path)
-            destination_path = os.path.join(memfs_path, 'imagenet')
-
-            os.mkdir(destination_path)
+            os.mkdir(self.data_dir)
             for tar_file, _ in ARCHIVE_META.values():
-                os.symlink(os.path.join(tar_path, tar_file), os.path.join(destination_path, tar_file))
-            print('unpacking train set')
-            ImageNet(destination_path, split='train')
-            print('unpacking val set')
-            ImageNet(destination_path, split='val')
-            print('done unpacking imagenet at:', destination_path)
-
-            self.data_dir = destination_path
+                os.symlink(os.path.join(self.disk_dir, tar_file), os.path.join(self.data_dir, tar_file))
+            print('unpacking train set', file=sys.stderr)
+            ImageNet(self.data_dir, split='train')
+            print('unpacking val set', file=sys.stderr)
+            ImageNet(self.data_dir, split='val')
+            print('done unpacking imagenet at:', self.data_dir, file=sys.stderr)
