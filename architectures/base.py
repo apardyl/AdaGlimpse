@@ -31,7 +31,7 @@ class BaseArchitecture(LightningModule, ABC):
         parser.add_argument('--lr',
                             help='learning-rate',
                             type=float,
-                            default=1e-3)
+                            default=5e-4)
         parser.add_argument('--warmup-epochs',
                             help='epochs to warmup LR',
                             type=int,
@@ -55,8 +55,11 @@ class BaseArchitecture(LightningModule, ABC):
                             action=argparse.BooleanOptionalAction)
         return parent_parser
 
+    def _all_params(self):
+        return self.parameters()
+
     def configure_optimizers(self):
-        optimizer = AdamW(self.parameters(), lr=self.lr, weight_decay=self.weight_decay, betas=(0.9, 0.95))
+        optimizer = AdamW(self._all_params(), lr=self.min_lr, weight_decay=self.weight_decay, betas=(0.9, 0.95))
         scheduler = MaeScheduler(optimizer=optimizer,
                                  lr=self.lr,
                                  warmup_epochs=self.warmup_epochs,

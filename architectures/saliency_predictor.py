@@ -1,6 +1,7 @@
 import sys
 
 import torch
+from torch.nn import Module
 
 from architectures.base import BaseArchitecture
 from architectures.mae import mae_vit_base_patch16
@@ -13,6 +14,9 @@ class SaliencyPredictor(BaseArchitecture):
 
         self.teacher = mae_vit_base_patch16(img_size=datamodule.image_size)
         print(self.load_teacher(teacher_path), file=sys.stderr)
+        for param in self.teacher.parameters():
+            param.requires_grad = False
+        self.teacher.eval()
 
         self.predictor = mae_vit_base_patch16(img_size=datamodule.image_size, num_classes=14 * 14)
 
@@ -22,6 +26,9 @@ class SaliencyPredictor(BaseArchitecture):
         if self.compile_model:
             self.predictor = torch.compile(self.predictor, mode='reduce-overhead')
             self.teacher = torch.compile(self.teacher, mode='reduce-overhead')
+
+    def _all_params(self):
+        return self.predictor.parameters()
 
     @classmethod
     def add_argparse_args(cls, parent_parser):
