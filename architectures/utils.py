@@ -44,7 +44,7 @@ class MaeScheduler(nn.Module):
         self.epochs = epochs
         self.optimizer = optimizer
 
-    def step(self, epoch):
+    def step(self, epoch, metrics=None):
         """Decay the learning rate with half-cycle cosine after warmup"""
         if epoch < self.warmup_epochs:
             lr = self.lr * (epoch + 1) / self.warmup_epochs

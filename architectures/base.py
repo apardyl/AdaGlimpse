@@ -2,7 +2,6 @@ import argparse
 from abc import ABC
 from typing import Any, Optional
 
-import torchmetrics
 from lightning import LightningModule
 from torch.optim import AdamW
 
@@ -10,7 +9,6 @@ from architectures.utils import MaeScheduler
 from datasets.base import BaseDataModule
 
 
-# noinspection PyArgumentList
 class BaseArchitecture(LightningModule, ABC):
     def __init__(self, datamodule: BaseDataModule, lr=1.5e-4, min_lr=1e-8, warmup_epochs=10, weight_decay=0,
                  epochs=100, compile_model=True, **_):
@@ -20,7 +18,6 @@ class BaseArchitecture(LightningModule, ABC):
         self.warmup_epochs = warmup_epochs
         self.weight_decay = weight_decay
         self.epochs = epochs
-        self.current_lr = lr
         self.compile_model = compile_model
 
         self.save_hyperparameters(ignore=['datamodule'])
@@ -77,8 +74,7 @@ class BaseArchitecture(LightningModule, ABC):
         return [optimizer], lr_schedulers
 
     def lr_scheduler_step(self, scheduler, metric: Optional[Any]) -> None:
-        # noinspection PyNoneFunctionAssignment
-        self.current_lr = scheduler.step(epoch=self.current_epoch)
+        scheduler.step(epoch=self.current_epoch, metrics=metric)
 
     def do_metrics(self, mode, out, batch):
         pass
@@ -86,8 +82,7 @@ class BaseArchitecture(LightningModule, ABC):
     def training_step(self, batch, batch_idx):
         out = self.forward(batch)
         loss = out['loss']
-        self.log('train/loss', loss, on_step=True, on_epoch=False, sync_dist=False)
-        self.log('train/lr', self.current_lr, on_step=False, on_epoch=True, sync_dist=False)
+        self.log('train/loss', loss, on_step=True, on_epoch=False, sync_dist=False, prog_bar=True)
         self.do_metrics('train', out, batch)
         return loss
 

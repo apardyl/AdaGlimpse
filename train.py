@@ -8,7 +8,8 @@ import time
 
 import torch
 from lightning import Trainer
-from lightning.pytorch.callbacks import ModelCheckpoint, RichProgressBar, RichModelSummary
+from lightning.pytorch.callbacks import ModelCheckpoint, RichProgressBar, RichModelSummary, LearningRateMonitor
+from lightning.pytorch.callbacks.progress.rich_progress import RichProgressBarTheme
 from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
 from lightning.pytorch.strategies import DDPStrategy
 
@@ -61,8 +62,9 @@ def main():
 
     callbacks = [
         ModelCheckpoint(dirpath=f"checkpoints/{run_name}", monitor="val/loss"),
-        RichProgressBar(leave=True),
-        RichModelSummary(max_depth=3)
+        RichProgressBar(leave=True, theme=RichProgressBarTheme(metrics_format='.2e')),
+        RichModelSummary(max_depth=3),
+        LearningRateMonitor(logging_interval='epoch')
     ]
 
     if 'SLURM_NTASKS' in os.environ:
