@@ -94,3 +94,77 @@ class RandomDelegatedSampler(PatchSampler):
     def __call__(self, img):
         sampler = self.rng.choice(self.samplers, p=self.proba)
         return sampler(img)
+
+
+class InteractiveSampler:
+    def __init__(self, images: torch.Tensor, native_patch_size=(16, 16)):
+        # B x C x H x W
+        assert len(images.shape) == 4 and images.shape[1] == 3
+        self._images = images
+        self._batch_size = images.shape[0]
+        self._native_patch_size = native_patch_size
+
+        self._patches = None
+        self._coords = None
+        self.initialize()
+
+    def sample(self, new_crops: torch.Tensor):
+        # B x P x (y, x, s)
+        assert new_crops.shape[0] == self._batch_size
+        assert new_crops.shape[2] == 3
+        assert new_crops.dtype == torch.long
+
+        num_patches = new_crops.shape[1]
+
+        new_patches = []
+        new_coords = []
+
+        # rework for batched operation in future
+        for idx in range(self._batch_size):
+            for patch in range(num_patches):
+                y, x, s = new_crops[idx, patch]
+                patch = self._images[idx, :, y:y + s, x:x + s]
+
+                if patch.shape[-1] != self._native_patch_size[0] or patch.shape[-2] != self._native_patch_size[1]:
+                    patch = TF.resize(patch, list(self._native_patch_size), antialias=False)
+                new_patches.append(patch)
+                new_coords.append([y, x, y + s, x + s])
+
+        new_patches = torch.stack(new_patches, dim=0).reshape(self._batch_size, num_patches, 3,
+                                                              self._native_patch_size[0],
+                                                              self._native_patch_size[1])
+        new_coords = torch.tensor(new_coords, device=self._images.device, dtype=torch.long).reshape(self._batch_size,
+                                                                                                    num_patches, 4)
+
+        self._patches = torch.cat([self._patches, new_patches], dim=1)
+        self._coords = torch.cat([self._coords, new_coords], dim=1)
+
+        return self._patches, self._coords
+
+    def initialize(self):
+        self._patches = torch.zeros((self._batch_size, 0, 3, self._native_patch_size[0], self._native_patch_size[1]),
+                                    dtype=self._images.dtype, device=self._images.device)
+        self._coords = torch.zeros((self._batch_size, 0, 4), dtype=torch.long, device=self._images.device)
+        self.do_grid(grid_size=4)  # 4 glimpses, change in future
+
+    @property
+    def patches(self):
+        return self._patches
+
+    @property
+    def coords(self):
+        return self._coords
+
+    @property
+    def num_patches(self):
+        return self._coords.shape[1]
+
+    def do_grid(self, grid_size=4):
+        samples = []
+        start_size = self._images.shape[-1] // grid_size
+        for y in range(0, 224, start_size):
+            for x in range(0, 224, start_size):
+                samples.append([y, x, start_size])
+        samples = torch.LongTensor(samples).unsqueeze(0)
+        samples = samples.repeat((self._batch_size, 1, 1))
+        self.sample(samples)

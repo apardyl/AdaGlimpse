@@ -10,7 +10,7 @@ from datasets.base import BaseDataModule
 
 
 class BaseArchitecture(LightningModule, ABC):
-    def __init__(self, datamodule: BaseDataModule, lr=1.5e-4, min_lr=1e-8, warmup_epochs=10, weight_decay=0,
+    def __init__(self, datamodule: BaseDataModule = None, lr=1.5e-4, min_lr=1e-8, warmup_epochs=10, weight_decay=0,
                  epochs=100, compile_model=True, **_):
         super().__init__()
         self.lr = lr

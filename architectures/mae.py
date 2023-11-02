@@ -1,3 +1,5 @@
+# Modified from the official MAE implementation, original copyright info bellow
+
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
 
@@ -72,6 +74,8 @@ class MaskedAutoencoderViT(nn.Module):
         # --------------------------------------------------------------------------
 
         self.norm_pix_loss = norm_pix_loss
+
+        self.decoder_output_tokens = self.decoder_pos_embed.shape[1] - 1
 
         # Classifier Head
         self.fc_norm = norm_layer(embed_dim) if use_fc_norm else nn.Identity()

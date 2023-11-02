@@ -1,7 +1,6 @@
 import sys
 
 import torch
-from torch.nn import Module
 
 from architectures.base import BaseArchitecture
 from architectures.mae import mae_vit_base_patch16

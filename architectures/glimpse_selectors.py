@@ -1,19 +1,22 @@
 import abc
-import argparse
 
 import torch
 import torch.nn as nn
 
-from architectures.glimpse_mae import BaseGlimpseMae
+import torchvision.transforms.functional as TF
+
+from architectures.mae import mae_vit_base_patch16
 
 
-class BaseGlimpseSelector:
-    def __init__(self, model: BaseGlimpseMae, args):
-        self.model = model
-        self.glimpse_size = args.glimpse_size
+class BaseGlimpseSelector(abc.ABC):
+    def __init__(self, model, images, glimpse_size=2):
+        self.glimpse_size = glimpse_size
+        assert len(images.shape) == 4 and images.shape[1] == 3
+        self._images = images
+        self._batch_size = images.shape[0]
+
         self.grid_h = model.mae.grid_size[0]
         self.grid_w = model.mae.grid_size[1]
-        self.debug_info = None
 
     @classmethod
     def add_argparse_args(cls, parent_parser):
@@ -21,92 +24,137 @@ class BaseGlimpseSelector:
         parser.add_argument('--glimpse-size',
                             help='size of a glimpse (in number of patches)',
                             type=int,
-                            default=3)
+                            default=2)
 
         return parent_parser
 
-    def __call__(self, *args, **kwargs):
-        self.debug_info = {}
-        return self.forward(*args, **kwargs)
 
-    def _add_glimpses(self, glimpse, mask, mask_indices):
-        glimpses = glimpse.repeat(1, self.glimpse_size)
-        for idx in range(1, self.glimpse_size):
-            glimpses[:, idx] += idx
-        glimpses = torch.cat([glimpses + self.grid_w * idx for idx in range(self.glimpse_size)], dim=1)
-        mask = mask.scatter(1, glimpses, torch.full_like(mask, fill_value=True))
-        mask_indices = torch.cat((mask_indices, glimpses), dim=1)
-        return mask, mask_indices, glimpse
+class PseudoElasticGlimpseSelector(BaseGlimpseSelector):
+    def __call__(self, selection_mask, coords: torch.Tensor):
+        assert self.glimpse_size == 2
 
-    @abc.abstractmethod
-    def forward(self, current_mask, mask_indices, glimpse_num):
-        raise NotImplemented()
+        B = selection_mask.shape[0]
 
+        # calculate sampling weights for next glimpse
+        next_mask = nn.functional.avg_pool2d(selection_mask, kernel_size=self.glimpse_size, stride=1, padding=0)
+        next_mask = nn.functional.pad(next_mask,
+                                      (0, self.grid_w - next_mask.shape[3], 0, self.grid_h - next_mask.shape[2]),
+                                      mode='constant', value=0)
+        assert next_mask.shape == (B, 1, self.grid_h, self.grid_w)
 
-class RandomGlimpseSelector(BaseGlimpseSelector):
+        next_mask = next_mask.reshape(B, -1)
+        # select next glimpse
+        glimpses = torch.argmax(next_mask, dim=1, keepdim=True).unsqueeze(1)
+        # B x 1 x 1
+        glimpses_h = glimpses.div(self.grid_h, rounding_mode='floor')
+        glimpses_w = glimpses - glimpses_h * self.grid_h
 
-    def forward(self, mask, mask_indices, glimpse_num):
-        """True in mask represents patches kept, False removed"""
-        N = mask.shape[0]
-        new_glimpse_x = torch.randint(0, self.grid_w - 2, size=(N, 1), device=mask.device)
-        new_glimpse_y = torch.randint(0, self.grid_h - 2, size=(N, 1), device=mask.device)
-        glimpses = self.grid_w * new_glimpse_y + new_glimpse_x
-        return self._add_glimpses(glimpses, mask, mask_indices)
+        glimpses_h = torch.cat([
+            glimpses_h + i for i in range(self.glimpse_size) for j in range(self.glimpse_size)
+        ], dim=1)
+        glimpses_w = torch.cat([
+            glimpses_w + j for i in range(self.glimpse_size) for j in range(self.glimpse_size)
+        ], dim=1)
+        glimpses_h = glimpses_h * 16
+        glimpses_w = glimpses_w * 16
+        glimpses_s = torch.ones_like(glimpses_h) * 16
 
-
-class CheckerboardGlimpseSelector(BaseGlimpseSelector):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.coordinates = [(1, 1), (5, 1), (9, 1), (13, 1),
-                            (1, 5), (5, 5), (9, 5), (13, 5)]
-
-    def forward(self, mask, mask_indices, glimpse_num):
-        N = mask.shape[0]
-        to_take = self.coordinates[glimpse_num]
-        new_glimpse_x = torch.full((N, 1), fill_value=to_take[0], device=mask.device)
-        new_glimpse_y = torch.full((N, 1), fill_value=to_take[1], device=mask.device)
-        glimpses = self.grid_w * new_glimpse_y + new_glimpse_x
-        return self._add_glimpses(glimpses, mask, mask_indices)
+        glimpses = torch.cat([glimpses_h, glimpses_w, glimpses_s], dim=2)
+        return glimpses
 
 
-class AttentionGlimpseSelector(BaseGlimpseSelector):
-    def __init__(self, model, args):
-        super().__init__(model, args)
-        self.attention_layer = args.attention_layer
-        self.random_first = args.random_first
-        assert not model.single_step
+class STAMLikeGlimpseSelector(BaseGlimpseSelector):
 
-    @classmethod
-    def add_argparse_args(cls, parent_parser):
-        parent_parser = super().add_argparse_args(parent_parser)
-        parser = parent_parser.add_argument_group(AttentionGlimpseSelector.__name__)
-        parser.add_argument('--attention-layer',
-                            help='number of attention layer in MAE to source entropy information from (0-7)',
-                            type=int,
-                            default=7)
-        parser.add_argument('--random-first',
-                            help='randomly select first glimpse',
-                            type=bool,
-                            default=False,
-                            action=argparse.BooleanOptionalAction)
+    def __init__(self, model, images, glimpse_size=2):
+        super().__init__(model, images, glimpse_size)
+        assert self.glimpse_size == 2
 
-        return parent_parser
+        self.mask = torch.ones((self._batch_size, 7 * 7), device=images.device, dtype=torch.long)
 
-    def forward(self, current_mask, mask_indices, glimpse_num):
-        if self.random_first and glimpse_num == 0:
-            N = current_mask.shape[0]
-            new_glimpse_x = torch.randint(0, self.grid_w - 2, size=(N, 1), device=current_mask.device)
-            new_glimpse_y = torch.randint(0, self.grid_h - 2, size=(N, 1), device=current_mask.device)
-            glimpses = self.grid_w * new_glimpse_y + new_glimpse_x
-            return self._add_glimpses(glimpses, current_mask, mask_indices)
+    def __call__(self, selection_mask, coords: torch.Tensor):
+        assert self.glimpse_size == 2  # WIP
 
+        selection_mask = TF.resize(selection_mask, [7, 7]).squeeze(1)
+        selection_mask = selection_mask.reshape(self._batch_size, -1)
+
+        selection_mask *= self.mask
+        # select next glimpse
+        glimpses = torch.argmax(selection_mask, dim=1, keepdim=True)
+        # B x 1 x 1
+        self.mask = self.mask.scatter(dim=-1, index=glimpses, value=0)
+        glimpses = glimpses.unsqueeze(1)
+
+        glimpses_h = glimpses.div(7, rounding_mode='floor')
+        glimpses_w = glimpses - glimpses_h * 7
+
+        glimpses_h = glimpses_h * 2
+        glimpses_w = glimpses_w * 2
+
+        glimpses_h = torch.cat([
+            glimpses_h + i for i in range(self.glimpse_size) for j in range(self.glimpse_size)
+        ], dim=1)
+        glimpses_w = torch.cat([
+            glimpses_w + j for i in range(self.glimpse_size) for j in range(self.glimpse_size)
+        ], dim=1)
+        glimpses_h = glimpses_h * 16
+        glimpses_w = glimpses_w * 16
+        glimpses_s = torch.ones_like(glimpses_h) * 16
+
+        glimpses = torch.cat([glimpses_h, glimpses_w, glimpses_s], dim=2)
+        return glimpses
+
+
+class DivideFourGlimpseSelector(BaseGlimpseSelector):
+
+    def __init__(self, model, images, glimpse_size=2):
+        super().__init__(model, images, glimpse_size)
+        assert self.glimpse_size == 2
+        # use 16x16 grid for easy division by 2, virtual patch size = 14
+
+        start_size = 4
+        samples_batch = [[
+            [y, x, start_size]
+            for y in range(0, 16, start_size)
+            for x in range(0, 16, start_size)
+        ] for _ in range(self._batch_size)]
+        self.samples_batch = samples_batch
+
+    def __call__(self, selection_mask, coords: torch.Tensor):
+        selection_mask = TF.resize(selection_mask, [16, 16]).squeeze(1)
+        batch_glimpses = []
+        for idx in range(self._batch_size):
+            samples = self.samples_batch[idx]
+            candidates = [
+                (selection_mask[idx, s[0]:s[0] + s[2], s[1]:s[1] + s[2]].sum().item(), s) for s in samples if s[2] > 1
+            ]
+            y, x, s = list(sorted(candidates, reverse=True))[0][1]
+            q = s // 2
+            glimpses = [
+                [i, j, q] for i, j in [(y, x), (y + q, x), (y, x + q), (y + q, x + q)]
+            ]
+            samples.extend(glimpses)
+            batch_glimpses.append(glimpses)
+        return torch.tensor(batch_glimpses, dtype=torch.long, device=self._images.device) * 14  # virtual patch size
+
+
+class ElasticAttentionMapEntropy:
+    def __init__(self, model, attention_layer=7, **_):
+        self.attention_layer = attention_layer
+
+        self.model = model
+
+        self.grid_h = model.mae.grid_size[0]
+        self.grid_w = model.mae.grid_size[1]
+
+    def __call__(self, *_):
         with torch.no_grad():
             # get self attention weights
-            attn = self.model.mae.last_attn[self.attention_layer][..., 1:, 1:]
+            attn = self.model.mae.decoder_attn_scores[self.attention_layer][..., -self.model.mae.decoder_output_tokens:,
+                   -self.model.mae.decoder_output_tokens:]
             B = attn.shape[0]
 
             # set attention weights to known patches to 0
-            attn = attn * (~current_mask).reshape((B, 1, -1, 1))
+            # attn = attn * (~current_mask).reshape((B, 1, -1, 1))
 
             # calculate entropy of attention weights for each output patch
             entropy = (-attn * torch.log2(attn))
@@ -115,26 +163,23 @@ class AttentionGlimpseSelector(BaseGlimpseSelector):
             entropy = entropy.sum((1, 3))
             entropy = entropy.reshape(shape=(B, 1, self.grid_h, self.grid_w))
 
-            if self.model.debug:
-                self.debug_info['entropy'] = entropy.detach().clone()
+            return entropy
 
-            # calculate sampling weights for next glimpse
-            next_mask = nn.functional.avg_pool2d(entropy, kernel_size=self.glimpse_size, stride=1, padding=0)
-            next_mask = nn.functional.pad(next_mask,
-                                          (0, self.grid_w - next_mask.shape[3], 0, self.grid_h - next_mask.shape[2]),
-                                          mode='constant', value=0)
-            assert next_mask.shape == (B, 1, self.grid_h, self.grid_w)
-            del entropy
 
-            if self.model.debug:
-                selection_map = next_mask.detach().clone()
-                s = selection_map.shape
-                selection_map = selection_map.reshape(B, -1)
-                selection_map = nn.functional.softmax(selection_map, dim=1)
-                selection_map = selection_map.reshape(s)
-                self.debug_info['selection_map'] = selection_map
+class ElasticSaliencyMap:
+    def __init__(self, model, **_):
+        self.predictor = mae_vit_base_patch16(img_size=model.mae.patch_embed.img_size, num_classes=14 * 14)
+        checkpoint = torch.load('/tmp/epoch=132-step=665665.ckpt')['state_dict']
+        checkpoint = {k[len('predictor.'):]: v for k, v in checkpoint.items() if k.startswith('predictor')}
+        self.predictor.load_state_dict(checkpoint)
+        self.predictor = self.predictor.to(model.device)
+        self.predictor.eval()
 
-            next_mask = next_mask.reshape(B, -1)
-            # select next glimpse
-            glimpses = torch.argmax(next_mask, dim=1).unsqueeze(1)
-        return self._add_glimpses(glimpses, current_mask, mask_indices)
+        self.grid_h = model.mae.grid_size[0]
+        self.grid_w = model.mae.grid_size[1]
+
+    def __call__(self, patches, coords):
+        self.predictor = self.predictor.to(patches.device)
+        with torch.no_grad():
+            sal_map = self.predictor.forward_head(self.predictor.forward_encoder(patches.to(torch.float32), coords=coords))
+            return sal_map.reshape(shape=(patches.shape[0], 1, self.grid_h, self.grid_w))

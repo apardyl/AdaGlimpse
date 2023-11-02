@@ -28,7 +28,7 @@ class ReconstructionDataset(torch.utils.data.Dataset):
         sample = Image.open(sample).convert('RGB')
         if self.transform is not None:
             sample = self.transform(sample)
-        return sample, torch.zeros(1)  # empty
+        return {'image': sample}
 
 
 class BaseReconstructionDataModule(BaseDataModule, abc.ABC):

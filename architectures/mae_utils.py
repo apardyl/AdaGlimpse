@@ -1,5 +1,3 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
 from typing import Optional, Callable
 
 import numpy as np

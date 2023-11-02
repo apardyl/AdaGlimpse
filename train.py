@@ -41,6 +41,11 @@ def define_args(parent_parser):
                         help='experiment name',
                         type=str,
                         default=None)
+    parser.add_argument('--validate-only',
+                        help='perform only the validation step',
+                        type=bool,
+                        default=False,
+                        action=argparse.BooleanOptionalAction)
     return parent_parser
 
 
@@ -100,6 +105,10 @@ def main():
                       benchmark=True,
                       check_val_every_n_epoch=2
                       )
+
+    if args.validate_only:
+        trainer.validate(model=model, datamodule=data_module)
+        return
 
     trainer.fit(model=model, datamodule=data_module)
     if data_module.has_test_data:

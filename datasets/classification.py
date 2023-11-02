@@ -1,13 +1,15 @@
 import abc
 import os
+import sys
 from collections import Counter
-from typing import Optional
+from typing import Optional, Tuple, Any, Dict
 
 import torch
 from PIL import Image
 from lightning.pytorch.utilities.types import TRAIN_DATALOADERS, EVAL_DATALOADERS
 from torch.utils.data import RandomSampler
 from torchvision.datasets import ImageNet
+from torchvision.datasets.imagenet import ARCHIVE_META
 
 from datasets.base import BaseDataModule
 from datasets.three_augment import three_augment
@@ -28,7 +30,10 @@ class ClassificationDataset(torch.utils.data.Dataset):
         sample = Image.open(sample).convert('RGB')
         if self.transform is not None:
             sample = self.transform(sample)
-        return sample, self.labels[index]
+        return {
+            'image': sample,
+            'label': self.labels[index]
+        }
 
     def class_stats(self):
         return [v for k, v in sorted(Counter(self.labels).items())]
@@ -92,14 +97,21 @@ class ImageNetWithStats(ImageNet):
     def class_stats(self):
         return [v for k, v in sorted(Counter(self.targets).items())]
 
+    def __getitem__(self, index: int) -> Dict[str, Any]:
+        sample, target = super().__getitem__(index)
+        return {
+            "image": sample,
+            "label": target
+        }
 
-class ImageNet1kClassification(BaseClassificationDataModule):
+
+class ImageNet1k(BaseClassificationDataModule):
     has_test_data = False
     cls_num_classes = 1000
 
     def setup(self, stage: Optional[str] = None) -> None:
 
-        if stage == 'fit':
+        if stage == 'fit' or stage == 'validate':
             self.train_dataset = ImageNetWithStats(root=self.data_dir, split='train',
                                                    transform=
                                                    get_default_img_transform(self.image_size)
@@ -109,3 +121,13 @@ class ImageNet1kClassification(BaseClassificationDataModule):
                                                  transform=get_default_img_transform(self.image_size))
         else:
             raise NotImplemented()
+
+    def _load_to_memfs(self) -> None:
+        os.mkdir(self.data_dir)
+        for tar_file, _ in ARCHIVE_META.values():
+            os.symlink(os.path.join(self.disk_dir, tar_file), os.path.join(self.data_dir, tar_file))
+        print('unpacking train set', file=sys.stderr)
+        ImageNet(self.data_dir, split='train')
+        print('unpacking val set', file=sys.stderr)
+        ImageNet(self.data_dir, split='val')
+        print('done unpacking imagenet at:', self.data_dir, file=sys.stderr)

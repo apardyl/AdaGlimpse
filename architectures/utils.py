@@ -1,40 +1,17 @@
 import math
-from typing import Callable, Dict
+from typing import Dict, Callable
 
 import torch
 import torch.nn as nn
 
 
-class WarmUpScheduler(nn.Module):
-    """Warm-up and exponential decay chain scheduler. If warm_up_iters > 0 than warm-ups linearly for warm_up_iters iterations.
-    Then it decays the learning rate every epoch. It is a good idea to set warm_up_iters as total number of samples in epoch / batch size.
-    Good for transformers"""
-
-    def __init__(self, optimizer, warm_up_iters=0, lr_decay=0.97):
-        super().__init__()
-        self.optimizer = optimizer
-        self.total_steps, self.warm_up_iters = 0, warm_up_iters
-        self.warmup_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, 1e-6,
-                                                                  total_iters=warm_up_iters) if warm_up_iters else None
-        self.decay_scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=lr_decay, last_epoch=-1)
-
-    def step(self):
-        self.total_steps += 1
-        if self.warmup_scheduler:
-            self.warmup_scheduler.step()
-
-    def step_epoch(self):
-        if self.total_steps > self.warm_up_iters:
-            self.decay_scheduler.step()
-
-
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-
-# This source code is licensed under the license found in the
-# LICENSE file in the root directory of this source tree.
-
 class MaeScheduler(nn.Module):
+    # Copyright (c) Meta Platforms, Inc. and affiliates.
+    # All rights reserved.
+
+    # This source code is licensed under the license found in the
+    # LICENSE file in the root directory of this source tree.
+
     def __init__(self, optimizer, lr, warmup_epochs, min_lr, epochs):
         super().__init__()
 
@@ -59,6 +36,10 @@ class MaeScheduler(nn.Module):
         return lr
 
 
+def dict_to_cpu(tensor_dict: Dict[str, torch.Tensor]):
+    return {k: v.detach().clone().cpu() for k, v in tensor_dict.items()}
+
+
 class MetricMixin:
     def define_metric(self, name: str, metric_constructor: Callable):
         for mode in ['train', 'val', 'test']:
@@ -71,7 +52,3 @@ class MetricMixin:
                    sync_dist: bool = True, prog_bar: bool = False, **kwargs) -> None:
         self.log(name=f'{mode}/{name}', value=self.get_metric(mode, name)(*args, **kwargs), on_step=on_step,
                  on_epoch=on_epoch, sync_dist=sync_dist, prog_bar=prog_bar)
-
-
-def dict_to_cpu(tensor_dict: Dict[str, torch.Tensor]):
-    return {k: v.detach().clone().cpu() for k, v in tensor_dict.items()}

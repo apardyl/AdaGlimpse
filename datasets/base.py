@@ -1,4 +1,6 @@
 import abc
+import argparse
+import os
 import sys
 from argparse import ArgumentParser
 
@@ -11,7 +13,7 @@ class BaseDataModule(LightningDataModule, abc.ABC):
     has_test_data = True
 
     def __init__(self, data_dir, train_batch_size=16, eval_batch_size=64, num_workers=4, num_samples=None,
-                 image_size=(224, 224), force_no_augment=False, **_):
+                 image_size=(224, 224), force_no_augment=False, mem_fs=False, **_):
         super().__init__()
 
         self.data_dir = data_dir
@@ -25,6 +27,14 @@ class BaseDataModule(LightningDataModule, abc.ABC):
         self.train_dataset = None
         self.test_dataset = None
         self.val_dataset = None
+
+        self.mem_fs = mem_fs
+        self.disk_dir = self.data_dir
+        if self.mem_fs:
+            memfs_path = os.environ['MEMFS']
+            print('using memfs at:', memfs_path, file=sys.stderr)
+            self.data_dir = os.path.join(memfs_path, 'dataset')
+            self.prepare_data_per_node = True
 
     @classmethod
     def add_argparse_args(cls, parent_parser: ArgumentParser, **kwargs) -> ArgumentParser:
@@ -54,6 +64,11 @@ class BaseDataModule(LightningDataModule, abc.ABC):
                             type=int,
                             nargs=2,
                             default=(224, 224))
+        parser.add_argument('--mem-fs',
+                            help='load dataset to MEMFS',
+                            type=bool,
+                            default=False,
+                            action=argparse.BooleanOptionalAction)
         return parent_parser
 
     def train_dataloader(self) -> TRAIN_DATALOADERS:
@@ -62,7 +77,8 @@ class BaseDataModule(LightningDataModule, abc.ABC):
         if self.num_samples is not None:
             sampler = RandomSampler(self.train_dataset, replacement=True, num_samples=self.num_samples)
         return DataLoader(self.train_dataset, batch_size=self.train_batch_size, num_workers=self.num_workers,
-                          sampler=sampler, shuffle=None if sampler is not None else True, drop_last=True, pin_memory=True)
+                          sampler=sampler, shuffle=None if sampler is not None else True, drop_last=True,
+                          pin_memory=True)
 
     def test_dataloader(self) -> EVAL_DATALOADERS:
         print(f'Loaded {len(self.test_dataset)} test samples', file=sys.stderr)
@@ -73,3 +89,10 @@ class BaseDataModule(LightningDataModule, abc.ABC):
         print(f'Loaded {len(self.val_dataset)} val samples', file=sys.stderr)
         return DataLoader(self.val_dataset, batch_size=self.eval_batch_size, shuffle=False,
                           num_workers=self.num_workers, pin_memory=True)
+
+    def _load_to_memfs(self):
+        raise NotImplemented()
+
+    def prepare_data(self) -> None:
+        if self.mem_fs:
+            self._load_to_memfs()
