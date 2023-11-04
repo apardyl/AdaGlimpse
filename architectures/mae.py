@@ -292,7 +292,7 @@ class MaskedAutoencoderViT(nn.Module):
 
         mask = result[:, 0, 1:]
         mask = mask / torch.amax(mask, dim=-1, keepdim=True)
-        mask = mask.reshape(mask.shape[0], self.grid_size[0], self.grid_size[1])
+        # mask = mask.reshape(mask.shape[0], self.grid_size[0], self.grid_size[1])
         return mask
 
 

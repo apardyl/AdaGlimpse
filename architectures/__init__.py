@@ -1,3 +1,3 @@
 from .elastic_mae import ElasticMae, SimpleAMEGlimpseElasticMae, DivideFourGlimpseElasticMae, StamlikeGlimpseElasticMae, \
-    StamlikeSaliencyGlimpseElasticMae, DivideFourSaliencyGlimpseElasticMae
+    StamlikeSaliencyGlimpseElasticMae, DivideFourSaliencyGlimpseElasticMae, ClsStamlikeSaliencyGlimpseElasticMae, ClsDivideFourSaliencyGlimpseElasticMae
 from .saliency_predictor import SaliencyPredictor

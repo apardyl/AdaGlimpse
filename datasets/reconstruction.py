@@ -41,11 +41,11 @@ class Coco2014Reconstruction(BaseReconstructionDataModule):
         val_dir = os.path.join(self.data_dir, 'val2014')
         test_dir = os.path.join(self.data_dir, 'test2014')
 
-        if stage == 'fit':
+        if stage == 'fit' or stage == 'validate':
             self.train_dataset = ReconstructionDataset(root_dir=train_dir,
                                                        transform=
                                                        get_default_img_transform(self.image_size)
-                                                       if self.no_aug else
+                                                       if self.force_no_augment else
                                                        get_default_aug_img_transform(self.image_size))
             self.val_dataset = ReconstructionDataset(root_dir=val_dir,
                                                      transform=get_default_img_transform(self.image_size))

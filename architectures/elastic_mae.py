@@ -4,6 +4,7 @@ from functools import partial
 
 import torch
 import torchmetrics
+from torch import nn
 
 from architectures.base import BaseArchitecture
 from architectures.glimpse_selectors import PseudoElasticGlimpseSelector, ElasticAttentionMapEntropy, \
@@ -11,6 +12,7 @@ from architectures.glimpse_selectors import PseudoElasticGlimpseSelector, Elasti
 from architectures.mae import mae_vit_base_patch16
 from architectures.utils import MetricMixin
 from datasets.base import BaseDataModule
+from datasets.classification import BaseClassificationDataModule
 from datasets.patch_sampler import InteractiveSampler
 from datasets.utils import IMAGENET_MEAN, IMAGENET_STD
 
@@ -44,6 +46,7 @@ class ElasticMae(BaseArchitecture, ABC):
 
         if 'model' in checkpoint:
             checkpoint = checkpoint["model"]
+            checkpoint = {'_orig_mod.' + k: v for k, v in checkpoint.items()}
             prefix = ''
         elif 'state_dict' in checkpoint:
             checkpoint = checkpoint['state_dict']
@@ -180,4 +183,56 @@ class StamlikeSaliencyGlimpseElasticMae(SaliencyGlimpseElasticMae):
 
 
 class DivideFourSaliencyGlimpseElasticMae(SaliencyGlimpseElasticMae):
+    glimpse_selector_class = DivideFourGlimpseSelector
+
+
+class _GlimpseElasticMaeClassification(_GlimpseElasticMae, MetricMixin):
+    def __init__(self, datamodule: BaseDataModule, **kwargs):
+        super().__init__(datamodule, **kwargs)
+        assert isinstance(datamodule, BaseClassificationDataModule)
+        self.num_classes = datamodule.num_classes
+
+        self.define_metric('accuracy',
+                           partial(torchmetrics.classification.MulticlassAccuracy,
+                                   num_classes=self.num_classes,
+                                   average='micro'))
+        self.criterion = nn.CrossEntropyLoss()
+
+    def do_metrics(self, mode, out, batch):
+        super().do_metrics(mode, out, batch)
+
+        self.log_metric(mode, 'accuracy', out['pred'], batch['label'])
+
+
+class SaliencyGlimpseCLSElasticMae(_GlimpseElasticMaeClassification):
+    selection_map_extractor_class = ElasticSaliencyMap
+    glimpse_selector_class = None
+
+    def __init__(self, datamodule: BaseDataModule, **kwargs):
+        super().__init__(datamodule, **kwargs)
+
+        self.patch_sampler_class = InteractiveSampler
+        self.extractor = self.selection_map_extractor_class(self)
+
+    def forward(self, batch, compute_loss=True):
+        image = batch['image']
+        sampler = self.patch_sampler_class(image)
+        selector = self.glimpse_selector_class(self, image)
+
+        for step in range(self.num_glimpses - 4):
+            selection_mask = self.extractor(sampler.patches, sampler.coords)
+            next_glimpse = selector(selection_mask, sampler.coords)
+            sampler.sample(next_glimpse)
+
+        latent = self.mae.forward_encoder(sampler.patches, coords=sampler.coords)
+        pred = self.mae.forward_head(latent)
+        loss = self.criterion(pred, batch['label'])
+
+        return {'pred': pred, 'loss': loss, 'coords': sampler.coords}
+
+
+class ClsStamlikeSaliencyGlimpseElasticMae(SaliencyGlimpseCLSElasticMae):
+    glimpse_selector_class = STAMLikeGlimpseSelector
+
+class ClsDivideFourSaliencyGlimpseElasticMae(SaliencyGlimpseCLSElasticMae):
     glimpse_selector_class = DivideFourGlimpseSelector

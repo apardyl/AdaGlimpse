@@ -1,6 +1,7 @@
 import sys
 
 import torch
+from torch import nn
 
 from architectures.base import BaseArchitecture
 from architectures.mae import mae_vit_base_patch16
@@ -25,6 +26,8 @@ class SaliencyPredictor(BaseArchitecture):
         if self.compile_model:
             self.predictor = torch.compile(self.predictor, mode='reduce-overhead')
             self.teacher = torch.compile(self.teacher, mode='reduce-overhead')
+
+        self.criterion = nn.MSELoss(reduction='sum')
 
     def _all_params(self):
         return self.predictor.parameters()
@@ -64,11 +67,11 @@ class SaliencyPredictor(BaseArchitecture):
         self.teacher.eval()
         with torch.no_grad():
             teacher_out = self.teacher.forward_head(self.teacher.forward_encoder(image))
-            saliency = self.teacher.encoder_attention_rollout().detach()
+            saliency = self.teacher.encoder_attention_rollout(discard_ratio=0).detach().reshape(image.shape[0], -1)
 
         pred = self.predictor.forward_head(self.predictor.forward_encoder(patches, coords=coords))
 
-        loss = ((pred - saliency.reshape(pred.shape)) ** 2).mean()
+        loss = self.criterion(pred, saliency)
 
         return {
             'teacher_out': teacher_out,
