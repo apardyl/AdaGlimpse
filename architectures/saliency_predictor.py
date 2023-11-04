@@ -13,7 +13,8 @@ class SaliencyPredictor(BaseArchitecture):
         super().__init__(datamodule, **kwargs)
 
         self.teacher = mae_vit_base_patch16(img_size=datamodule.image_size)
-        print(self.load_teacher(teacher_path), file=sys.stderr)
+        if teacher_path is not None:
+            print(self.load_teacher(teacher_path), file=sys.stderr)
         for param in self.teacher.parameters():
             param.requires_grad = False
         self.teacher.eval()

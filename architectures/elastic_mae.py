@@ -74,6 +74,44 @@ class ElasticMae(BaseArchitecture, ABC):
         return {"out": out, "loss": loss}
 
 
+class HybridElasticMae(ElasticMae, MetricMixin):
+
+    def __init__(self, datamodule: BaseDataModule, out_chans=3, pretrained_path=None, **kwargs):
+        super().__init__(datamodule, out_chans, pretrained_path, **kwargs)
+
+        assert isinstance(datamodule, BaseClassificationDataModule)
+        self.num_classes = datamodule.num_classes
+
+        self.define_metric('accuracy',
+                           partial(torchmetrics.classification.MulticlassAccuracy,
+                                   num_classes=self.num_classes,
+                                   average='micro'))
+        self.criterion = nn.CrossEntropyLoss()
+
+    def forward(self, batch):
+        image = batch['image']
+        patches = batch['patches']
+        coords = batch['coords']
+        labels = batch['label']
+
+        latent = self.mae.forward_encoder(patches, coords=coords)
+        out = self.mae.forward_decoder(latent)
+        pred = self.mae.forward_head(latent)
+        rec_loss = self.mae.forward_reconstruction_loss(image, out)
+        cls_loss = self.criterion(pred, labels)
+
+        loss = rec_loss * 0.01 + cls_loss
+
+        return {"out": out, "loss": loss, 'pred': pred, 'cls_loss': cls_loss, 'rec_loss': rec_loss}
+
+    def do_metrics(self, mode, out, batch):
+        super().do_metrics(mode, out, batch)
+
+        self.log_metric(mode, 'accuracy', out['pred'], batch['label'])
+        self.log(f'{mode}/cls_loss', out['cls_loss'], on_step=True, on_epoch=False, sync_dist=False)
+        self.log(f'{mode}/rec_loss', out['rec_loss'], on_step=True, on_epoch=False, sync_dist=False)
+
+
 class _GlimpseElasticMae(ElasticMae):
     def __init__(self, datamodule: BaseDataModule, num_glimpses=12, **kwargs):
         super().__init__(datamodule, **kwargs)
@@ -233,6 +271,7 @@ class SaliencyGlimpseCLSElasticMae(_GlimpseElasticMaeClassification):
 
 class ClsStamlikeSaliencyGlimpseElasticMae(SaliencyGlimpseCLSElasticMae):
     glimpse_selector_class = STAMLikeGlimpseSelector
+
 
 class ClsDivideFourSaliencyGlimpseElasticMae(SaliencyGlimpseCLSElasticMae):
     glimpse_selector_class = DivideFourGlimpseSelector
