@@ -68,7 +68,7 @@ class SaliencyPredictor(BaseArchitecture):
         self.teacher.eval()
         with torch.no_grad():
             teacher_out = self.teacher.forward_head(self.teacher.forward_encoder(image))
-            saliency = self.teacher.encoder_attention_rollout(discard_ratio=0).detach().reshape(image.shape[0], -1)
+            saliency = self.teacher.encoder_attention_rollout(discard_ratio=0.9).detach().reshape(image.shape[0], -1)
 
         pred = self.predictor.forward_head(self.predictor.forward_encoder(patches, coords=coords))
 

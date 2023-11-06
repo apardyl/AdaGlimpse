@@ -268,9 +268,9 @@ class MaskedAutoencoderViT(nn.Module):
             if head_fusion == "mean":
                 attention_heads_fused = attention.mean(dim=1)
             elif head_fusion == "max":
-                attention_heads_fused = attention.max(dim=1)
+                attention_heads_fused = attention.amax(dim=1)
             elif head_fusion == "min":
-                attention_heads_fused = attention.min(dim=1)
+                attention_heads_fused = attention.amin(dim=1)
             else:
                 raise "Attention head fusion type Not supported"
 
