@@ -9,7 +9,8 @@ from datasets.base import BaseDataModule
 
 
 class SaliencyPredictor(BaseArchitecture):
-    def __init__(self, datamodule: BaseDataModule, teacher_path=None, pretrained_path=None, **kwargs):
+    def __init__(self, datamodule: BaseDataModule, teacher_path=None, pretrained_path=None, predictor_path=None,
+                 **kwargs):
         super().__init__(datamodule, **kwargs)
 
         self.teacher = mae_vit_base_patch16(img_size=datamodule.image_size)
@@ -21,12 +22,15 @@ class SaliencyPredictor(BaseArchitecture):
 
         self.predictor = mae_vit_base_patch16(img_size=datamodule.image_size, num_classes=14 * 14)
 
-        if pretrained_path:
-            print(self.load_pretrained_elastic(pretrained_path), file=sys.stderr)
+        if predictor_path:
+            print(self.load_pretrained_elastic(predictor_path), file=sys.stderr)
 
         if self.compile_model:
             self.predictor = torch.compile(self.predictor, mode='reduce-overhead')
             self.teacher = torch.compile(self.teacher, mode='reduce-overhead')
+
+        if pretrained_path:
+            print(self.load_pair(pretrained_path), file=sys.stderr)
 
         self.criterion = nn.MSELoss(reduction='sum')
 
@@ -41,15 +45,23 @@ class SaliencyPredictor(BaseArchitecture):
                             help='path to pretrained MAE or ViT weights',
                             type=str,
                             default='./deit_3_base_224_1k.pth')
-        parser.add_argument('--pretrained-path',
+        parser.add_argument('--predictor-path',
                             help='path to pretrained MAE or ViT weights',
                             type=str,
                             default='./elastic-224-30random70grid.pth')
+        parser.add_argument('--pretrained-path',
+                            help='path to pretrained MAE or ViT weights',
+                            type=str,
+                            default=None)
         return parent_parser
 
     def load_teacher(self, path):
         checkpoint = torch.load(path, map_location='cpu')["model"]
         return self.teacher.load_state_dict(checkpoint, strict=False)
+
+    def load_pair(self, path):
+        checkpoint = torch.load(path, map_location='cpu')["state_dict"]
+        return self.load_state_dict(checkpoint, strict=True)
 
     def load_pretrained_elastic(self, path=""):
         checkpoint = torch.load(path, map_location='cpu')["model"]
