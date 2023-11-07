@@ -111,7 +111,8 @@ class InteractiveSampler:
     def sample_multi_relative(self, new_crops, grid_size=2):
         # B x (y, x, s)
         new_crops = new_crops.detach().clone()
-        new_crops[..., 2] *= min(self._images.shape[-1], self._images.shape[-1])
+        new_crops[..., 2] *= (min(self._images.shape[-1],
+                                  self._images.shape[-1]) / 2)  # max size = half image (we did not train for more)
         new_crops[..., 0] = new_crops[..., 0] * (self._images.shape[-2] - new_crops[..., 2])
         new_crops[..., 1] = new_crops[..., 1] * (self._images.shape[-1] - new_crops[..., 2])
         new_crops = torch.floor(new_crops)

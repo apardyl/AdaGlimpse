@@ -6,12 +6,12 @@ import torch
 import torchmetrics
 from tensordict import TensorDict
 from torch import nn
-from torchrl.data import ReplayBuffer, LazyTensorStorage
+from torchrl.data import LazyMemmapStorage, TensorDictReplayBuffer
 
 from architectures.base import BaseArchitecture
 from architectures.glimpse_selectors import ElasticAttentionMapEntropy
-from architectures.mae import mae_vit_base_patch16
-from architectures.rl_modules import Actor, Critic
+from architectures.mae import mae_vit_base_patch16, MaskedAutoencoderViT
+from architectures.rl_modules import Actor, Critic, OrnsteinUhlenbeckActionNoise
 from architectures.utils import MetricMixin, MaeScheduler
 from datasets.base import BaseDataModule
 from datasets.patch_sampler import InteractiveSampler
@@ -28,7 +28,7 @@ class SmartGlimpse(BaseArchitecture, MetricMixin):
 
         self.automatic_optimization = False  # disable lightning automation
 
-        self.mae = mae_vit_base_patch16(img_size=datamodule.image_size, out_chans=out_chans)
+        self.mae: MaskedAutoencoderViT = mae_vit_base_patch16(img_size=datamodule.image_size, out_chans=out_chans)
 
         self.extractor = ElasticAttentionMapEntropy(self)
         self.patch_sampler_class = InteractiveSampler
@@ -41,8 +41,8 @@ class SmartGlimpse(BaseArchitecture, MetricMixin):
         self.critic = Critic(self.state_dim, self.action_dim)
         self.critic_loss = nn.MSELoss()
 
-        self.buffer = ReplayBuffer(storage=LazyTensorStorage(max_size=10000, device=self.device),
-                                   batch_size=1024)
+        self.buffer = TensorDictReplayBuffer(storage=LazyMemmapStorage(max_size=10000, device=self.device),
+                                             batch_size=1024)
 
         if self.compile_model:
             self.mae = torch.compile(self.mae, mode='reduce-overhead')
@@ -63,6 +63,8 @@ class SmartGlimpse(BaseArchitecture, MetricMixin):
         #                            num_classes=self.num_classes,
         #                            average='micro'))
         # self.criterion = nn.CrossEntropyLoss()
+
+        self.noise = OrnsteinUhlenbeckActionNoise(action_dim=self.action_dim)
 
     def configure_optimizers(self):
         actor_optimizer = torch.optim.Adam(self.actor.parameters(), self.min_lr)
@@ -148,6 +150,9 @@ class SmartGlimpse(BaseArchitecture, MetricMixin):
         for glimpse_idx in range(self.num_glimpses):
             with torch.no_grad():
                 action = self.actor(state)
+                if self.training:
+                    noise = torch.from_numpy(self.noise.sample()).to(action.dtype).to(action.device)
+                    action = torch.clamp(action + noise, 0, 1)
                 env.sample_multi_relative(new_crops=action, grid_size=2)
                 latent = self.mae.forward_encoder(env.patches, coords=env.coords)
                 out = self.mae.forward_decoder(latent)

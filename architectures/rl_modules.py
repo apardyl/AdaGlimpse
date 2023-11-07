@@ -1,5 +1,8 @@
+import numpy as np
 import torch
 from torch import nn
+import torchrl.modules as rlnn
+from torchrl.data import BoundedTensorSpec
 
 EPS = 0.003
 
@@ -25,7 +28,9 @@ class Critic(nn.Module):
         )
 
         self.action_layers = nn.Sequential(
-            nn.Linear(action_dim, 128),
+            nn.Linear(action_dim, 32),
+            nn.ReLU(),
+            nn.Linear(32, 128),
             nn.ReLU()
         )
 
@@ -96,3 +101,22 @@ class Actor(nn.Module):
     def forward(self, state):
         action = self.layers(state)
         return action
+
+
+class OrnsteinUhlenbeckActionNoise:
+
+    def __init__(self, action_dim, mu=0, theta=0.15, sigma=0.05):
+        self.action_dim = action_dim
+        self.mu = mu
+        self.theta = theta
+        self.sigma = sigma
+        self.X = np.ones(self.action_dim) * self.mu
+
+    def reset(self):
+        self.X = np.ones(self.action_dim) * self.mu
+
+    def sample(self):
+        dx = self.theta * (self.mu - self.X)
+        dx = dx + self.sigma * np.random.randn(len(self.X))
+        self.X = self.X + dx
+        return self.X
