@@ -12,7 +12,7 @@ from architectures.base import BaseArchitecture
 from architectures.glimpse_selectors import ElasticAttentionMapEntropy
 from architectures.mae import mae_vit_base_patch16, MaskedAutoencoderViT
 from architectures.rl_modules import Actor, Critic, OrnsteinUhlenbeckActionNoise
-from architectures.utils import MetricMixin, MaeScheduler
+from architectures.utils import MetricMixin, MaeScheduler, hard_update, soft_update
 from datasets.base import BaseDataModule
 from datasets.patch_sampler import InteractiveSampler
 from datasets.utils import IMAGENET_MEAN, IMAGENET_STD
@@ -35,10 +35,16 @@ class SmartGlimpse(BaseArchitecture, MetricMixin):
 
         self.state_dim = 14 * 14  # entropy map
         self.action_dim = 3  # x y s
+        self.gamma = 0.99
+        self.tau = 0.001
 
         self.actor = Actor(self.state_dim, self.action_dim)
+        self.target_actor = Actor(self.state_dim, self.action_dim)
+        hard_update(self.actor, self.target_actor)
 
         self.critic = Critic(self.state_dim, self.action_dim)
+        self.target_critic = Critic(self.state_dim, self.action_dim)
+        hard_update(self.critic, self.target_critic)
         self.critic_loss = nn.MSELoss()
 
         self.buffer = TensorDictReplayBuffer(storage=LazyMemmapStorage(max_size=65536, device=self.device),
@@ -154,17 +160,23 @@ class SmartGlimpse(BaseArchitecture, MetricMixin):
 
         for glimpse_idx in range(self.num_glimpses):
             with torch.no_grad():
-                action = self.actor(state)
                 if self.training:
+                    action = self.actor(state)
                     noise = torch.from_numpy(self.noise.sample()).to(action.dtype).to(action.device)
                     action = torch.clamp(action + noise, 0, 1)
+                else:
+                    action = self.target_actor(state)
+
                 env.sample_multi_relative(new_crops=action, grid_size=2)
+
                 latent = self.mae.forward_encoder(env.patches, coords=env.coords)
                 out = self.mae.forward_decoder(latent)
                 # pred = self.mae.forward_head(latent)
                 rec_loss = self.mae.forward_reconstruction_loss(images, out, mean=False)
                 # cls_loss = self.criterion(pred, labels)
+
                 loss = rec_loss
+
                 next_state = self.extractor().reshape(images.shape[0], -1)
             if self.training:
                 # detach all gradients between MAE and RL
@@ -214,9 +226,9 @@ class SmartGlimpse(BaseArchitecture, MetricMixin):
             actor_optimizer.zero_grad()
 
             # optimize critic
-            next_action = self.actor(next_state).detach()
-            next_val = self.critic(next_state, next_action).detach()
-            expected_val = reward + 0.99 * next_val
+            next_action = self.target_actor(next_state).detach()
+            next_val = self.target_critic(next_state, next_action).detach()
+            expected_val = reward + self.gamma * next_val
             predicted_val = self.critic(state, action)
             loss_critic = self.critic_loss(predicted_val, expected_val)
             assert torch.isfinite(loss_critic)
@@ -233,6 +245,9 @@ class SmartGlimpse(BaseArchitecture, MetricMixin):
             loss_actor.backward()
             actor_optimizer.step()
             actor_losses.append(loss_actor.item())
+
+            soft_update(self.critic, self.target_critic, self.tau)
+            soft_update(self.actor, self.target_actor, self.tau)
 
         self.log('train/critic_loss', sum(critic_losses) / len(critic_losses), on_step=True, on_epoch=False,
                  sync_dist=False)
