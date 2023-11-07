@@ -108,8 +108,33 @@ class InteractiveSampler:
         self._coords = None
         self.initialize()
 
+    def sample_multi_relative(self, new_crops, grid_size=2):
+        # B x (y, x, s)
+        new_crops = new_crops.detach().clone()
+        new_crops[..., 2] *= min(self._images.shape[-1], self._images.shape[-1])
+        new_crops[..., 0] = new_crops[..., 0] * (self._images.shape[-2] - new_crops[..., 2])
+        new_crops[..., 1] = new_crops[..., 1] * (self._images.shape[-1] - new_crops[..., 2])
+        new_crops = torch.floor(new_crops)
+
+        patch_size = torch.floor(new_crops[..., 2] / grid_size)
+        last_patch_size = new_crops[..., 2] - patch_size * (grid_size - 1)
+
+        new_crops = new_crops.unsqueeze(1).repeat((1, grid_size * grid_size, 1))
+
+        for y in range(grid_size):
+            for x in range(grid_size):
+                new_crops[:, y * grid_size + x, 0] += y * patch_size
+                new_crops[:, y * grid_size + x, 1] += x * patch_size
+                if y == grid_size - 1 or x == grid_size - 1:
+                    new_crops[:, y * grid_size + x, 2] = last_patch_size
+                else:
+                    new_crops[:, y * grid_size + x, 2] = patch_size
+
+        new_crops = new_crops.to(torch.long)
+        return self.sample(new_crops)
+
     def sample(self, new_crops: torch.Tensor):
-        # B x P x (y, x, s)
+
         assert new_crops.shape[0] == self._batch_size
         assert new_crops.shape[2] == 3
         assert new_crops.dtype == torch.long

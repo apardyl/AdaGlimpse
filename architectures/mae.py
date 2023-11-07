@@ -208,7 +208,7 @@ class MaskedAutoencoderViT(nn.Module):
 
         return x
 
-    def forward_reconstruction_loss(self, imgs, pred, mask=None):
+    def forward_reconstruction_loss(self, imgs, pred, mask=None, mean=True):
         """
         imgs: [N, 3, H, W]
         pred: [N, L, p*p*3]
@@ -223,13 +223,13 @@ class MaskedAutoencoderViT(nn.Module):
         loss = (pred - target) ** 2
         loss = loss.mean(dim=-1)  # [N, L], mean loss per patch
 
+        if not mean:
+            return loss.sum(dim=-1, keepdim=True)  # loss per item in batch
         if mask is not None:
             mask_neg = ~mask
-            loss = (loss * mask_neg).sum() / mask_neg.sum()  # mean loss on removed patches
+            return (loss * mask_neg).sum() / mask_neg.sum()  # mean loss on removed patches
         else:
-            loss = loss.sum() / pred.shape[1]  # mean loss on all patches
-
-        return loss
+            return loss.sum() / pred.shape[1]  # mean loss on all patches
 
     def forward_head(self, x, pre_logits: bool = False):
         if self.global_pool:

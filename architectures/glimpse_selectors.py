@@ -163,7 +163,7 @@ class ElasticAttentionMapEntropy:
             entropy = entropy.sum((1, 3))
             entropy = entropy.reshape(shape=(B, 1, self.grid_h, self.grid_w))
 
-            return entropy
+            return entropy.detach().clone()
 
 
 class ElasticSaliencyMap:

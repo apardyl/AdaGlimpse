@@ -1,5 +1,5 @@
 import math
-from typing import Dict, Callable
+from typing import Dict, Callable, Collection
 
 import torch
 import torch.nn as nn
@@ -28,6 +28,7 @@ class MaeScheduler(nn.Module):
         else:
             lr = self.min_lr + (self.lr - self.min_lr) * 0.5 * \
                  (1. + math.cos(math.pi * (epoch - self.warmup_epochs) / (self.epochs + 1 - self.warmup_epochs)))
+
         for param_group in self.optimizer.param_groups:
             if "lr_scale" in param_group:
                 param_group["lr"] = lr * param_group["lr_scale"]
