@@ -97,12 +97,13 @@ class RandomDelegatedSampler(PatchSampler):
 
 
 class InteractiveSampler:
-    def __init__(self, images: torch.Tensor, native_patch_size=(16, 16)):
+    def __init__(self, images: torch.Tensor, native_patch_size=(16, 16), init_grid=True):
         # B x C x H x W
         assert len(images.shape) == 4 and images.shape[1] == 3
         self._images = images
         self._batch_size = images.shape[0]
         self._native_patch_size = native_patch_size
+        self._init_grid = init_grid
 
         self._patches = None
         self._coords = None
@@ -111,8 +112,12 @@ class InteractiveSampler:
     def sample_multi_relative(self, new_crops, grid_size=2):
         # B x (y, x, s)
         new_crops = new_crops.detach().clone()
-        new_crops[..., 2] *= (min(self._images.shape[-1],
-                                  self._images.shape[-1]) / 2)  # max size = half image (we did not train for more)
+        max_crop_size = (
+                    min(self._images.shape[-2], self._images.shape[-1]) / 2)  # half image (we did not train for more)
+        min_crop_size = min(self._native_patch_size) * grid_size
+
+        new_crops[..., 2] = new_crops[..., 2] * (max_crop_size - min_crop_size) + min_crop_size
+
         new_crops[..., 0] = new_crops[..., 0] * (self._images.shape[-2] - new_crops[..., 2])
         new_crops[..., 1] = new_crops[..., 1] * (self._images.shape[-1] - new_crops[..., 2])
         new_crops = torch.floor(new_crops)
@@ -171,7 +176,8 @@ class InteractiveSampler:
         self._patches = torch.zeros((self._batch_size, 0, 3, self._native_patch_size[0], self._native_patch_size[1]),
                                     dtype=self._images.dtype, device=self._images.device)
         self._coords = torch.zeros((self._batch_size, 0, 4), dtype=torch.long, device=self._images.device)
-        self.do_grid(grid_size=4)  # 4 glimpses, change in future
+        if self._init_grid:
+            self.do_grid(grid_size=4)  # 4 glimpses, change in future
 
     @property
     def patches(self):

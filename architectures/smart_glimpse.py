@@ -41,8 +41,8 @@ class SmartGlimpse(BaseArchitecture, MetricMixin):
         self.critic = Critic(self.state_dim, self.action_dim)
         self.critic_loss = nn.MSELoss()
 
-        self.buffer = TensorDictReplayBuffer(storage=LazyMemmapStorage(max_size=10000, device=self.device),
-                                             batch_size=1024)
+        self.buffer = TensorDictReplayBuffer(storage=LazyMemmapStorage(max_size=65536, device=self.device),
+                                             batch_size=2048)
 
         if self.compile_model:
             self.mae = torch.compile(self.mae, mode='reduce-overhead')
@@ -67,11 +67,11 @@ class SmartGlimpse(BaseArchitecture, MetricMixin):
         self.noise = OrnsteinUhlenbeckActionNoise(action_dim=self.action_dim)
 
     def configure_optimizers(self):
-        actor_optimizer = torch.optim.Adam(self.actor.parameters(), self.min_lr)
+        actor_optimizer = torch.optim.Adam(self.actor.parameters(), self.lr)
         actor_scheduler = MaeScheduler(
             optimizer=actor_optimizer,
             lr=self.lr,
-            warmup_epochs=self.warmup_epochs,
+            warmup_epochs=0,
             min_lr=self.min_lr,
             epochs=self.epochs
         )
@@ -79,7 +79,7 @@ class SmartGlimpse(BaseArchitecture, MetricMixin):
         critic_scheduler = MaeScheduler(
             optimizer=critic_optimizer,
             lr=self.lr,
-            warmup_epochs=self.warmup_epochs,
+            warmup_epochs=0,
             min_lr=self.min_lr,
             epochs=self.epochs
         )
@@ -112,7 +112,7 @@ class SmartGlimpse(BaseArchitecture, MetricMixin):
         parser.add_argument('--pretrained-mae-path',
                             help='path to pretrained MAE weights',
                             type=str,
-                            default='elastic_mae.ckpt')
+                            default=None)
         parser.add_argument('--rl-iters-per-step',
                             help='RL loop iterations per training step',
                             type=int,
@@ -139,13 +139,18 @@ class SmartGlimpse(BaseArchitecture, MetricMixin):
         images = batch['image']
         labels = batch['label']
 
-        critic_optimizer, actor_optimizer = self.optimizers()
+        critic_optimizer = None
+        actor_optimizer = None
 
         env = self.patch_sampler_class(images=images)
 
-        state = torch.zeros((images.shape[0], self.state_dim), device=images.device)
         out = None
         loss = None
+
+        with torch.no_grad():
+            latent = self.mae.forward_encoder(env.patches, coords=env.coords)
+            out = self.mae.forward_decoder(latent)
+            state = self.extractor().reshape(images.shape[0], -1)
 
         for glimpse_idx in range(self.num_glimpses):
             with torch.no_grad():
@@ -163,10 +168,13 @@ class SmartGlimpse(BaseArchitecture, MetricMixin):
                 next_state = self.extractor().reshape(images.shape[0], -1)
             if self.training:
                 # detach all gradients between MAE and RL
-                self._on_train_glimpse(glimpse_idx, critic_optimizer, actor_optimizer, state.detach().clone(),
+                self._on_train_glimpse(state.detach().clone(),
                                        action.detach().clone(),
                                        loss.detach().clone(), next_state.detach().clone())
             state = next_state
+
+        if self.training:
+            self._on_train_step(images)
 
         return {'out': out, 'loss': loss.mean(), 'coords': env.coords}
 
@@ -177,8 +185,9 @@ class SmartGlimpse(BaseArchitecture, MetricMixin):
                 sch.step(self.current_epoch)
         self.buffer.empty()
 
-    def _on_train_glimpse(self, glimpse_idx, critic_optimizer, actor_optimizer, current_state, current_action,
+    def _on_train_glimpse(self, current_state, current_action,
                           current_loss, current_next_state):
+
         self.buffer.extend(TensorDict({
             'state': current_state,
             'action': current_action,
@@ -186,16 +195,19 @@ class SmartGlimpse(BaseArchitecture, MetricMixin):
             'next_state': current_next_state
         }, batch_size=current_state.shape[0]))
 
+    def _on_train_step(self, images):
+        critic_optimizer, actor_optimizer = self.optimizers()
+
         critic_losses = []
         actor_losses = []
 
         for _ in range(self.rl_iters_per_step):
             sample = self.buffer.sample()
             state, action, reward, next_state = (
-                sample['state'].to(current_state.device),
-                sample['action'].to(current_state.device),
-                sample['reward'].to(current_state.device),
-                sample['next_state'].to(current_state.device)
+                sample['state'].to(images.device),
+                sample['action'].to(images.device),
+                sample['reward'].to(images.device),
+                sample['next_state'].to(images.device)
             )
 
             critic_optimizer.zero_grad()

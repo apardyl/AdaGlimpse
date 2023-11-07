@@ -21,17 +21,13 @@ class Critic(nn.Module):
         self.action_dim = action_dim
 
         self.state_layers = nn.Sequential(
-            nn.Linear(state_dim, 256),
-            nn.ReLU(),
-            nn.Linear(256, 128),
+            nn.Linear(state_dim, 128),
             nn.ReLU(),
         )
 
         self.action_layers = nn.Sequential(
-            nn.Linear(action_dim, 32),
+            nn.Linear(action_dim, 128),
             nn.ReLU(),
-            nn.Linear(32, 128),
-            nn.ReLU()
         )
 
         self.out_layers = nn.Sequential(
@@ -82,14 +78,11 @@ class Actor(nn.Module):
             nn.ReLU(),
             nn.Linear(256, 128),
             nn.ReLU(),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, action_dim),
+            nn.Linear(128, action_dim),
             nn.Sigmoid()
         )
 
         self.apply(self._init_weights)
-        self.layers[-2].weight.data.uniform_(-EPS, EPS)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -105,7 +98,7 @@ class Actor(nn.Module):
 
 class OrnsteinUhlenbeckActionNoise:
 
-    def __init__(self, action_dim, mu=0, theta=0.15, sigma=0.05):
+    def __init__(self, action_dim, mu=0, theta=0.15, sigma=0.1):
         self.action_dim = action_dim
         self.mu = mu
         self.theta = theta
