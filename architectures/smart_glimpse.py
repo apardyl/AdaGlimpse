@@ -215,7 +215,7 @@ class SmartGlimpse(BaseArchitecture, MetricMixin):
 
             # optimize actor
             predicted_action = self.actor(state)
-            loss_actor = -1 * torch.sum(self.critic(state, predicted_action))
+            loss_actor = -1 * torch.mean(self.critic(state, predicted_action))
             assert torch.isfinite(loss_critic)
             # loss_actor = torch.clip(loss_actor, -10, 10)  # prevent exploding gradient
             loss_actor.backward()
