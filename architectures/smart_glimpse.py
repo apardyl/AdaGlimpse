@@ -35,7 +35,7 @@ class SmartGlimpse(BaseArchitecture, MetricMixin):
 
         self.state_dim = 14 * 14  # entropy map
         self.action_dim = 3  # x y s
-        self.gamma = 0.99
+        self.gamma = 0.5
         self.tau = 0.001
 
         self.actor = Actor(self.state_dim, self.action_dim)
