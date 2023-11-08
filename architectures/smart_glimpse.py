@@ -175,7 +175,7 @@ class SmartGlimpse(BaseArchitecture, MetricMixin):
                 latent = self.mae.forward_encoder(env.patches, coords=env.coords)
                 out = self.mae.forward_decoder(latent)
                 # pred = self.mae.forward_head(latent)
-                next_los = self.mae.forward_reconstruction_loss(images, out, mean=False)
+                rec_loss = self.mae.forward_reconstruction_loss(images, out, mean=False)
                 # cls_loss = self.criterion(pred, labels)
 
                 loss = rec_loss
