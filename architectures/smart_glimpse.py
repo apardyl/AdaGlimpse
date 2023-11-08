@@ -152,10 +152,13 @@ class SmartGlimpse(BaseArchitecture, MetricMixin):
 
         out = None
         loss = None
+        prev_loss = None
 
         with torch.no_grad():
             latent = self.mae.forward_encoder(env.patches, coords=env.coords)
             out = self.mae.forward_decoder(latent)
+            loss = self.mae.forward_reconstruction_loss(images, out, mean=False)
+            prev_loss = loss.detach().clone()
             state = self.extractor().reshape(images.shape[0], -1)
 
         for glimpse_idx in range(self.num_glimpses):
@@ -172,7 +175,7 @@ class SmartGlimpse(BaseArchitecture, MetricMixin):
                 latent = self.mae.forward_encoder(env.patches, coords=env.coords)
                 out = self.mae.forward_decoder(latent)
                 # pred = self.mae.forward_head(latent)
-                rec_loss = self.mae.forward_reconstruction_loss(images, out, mean=False)
+                next_los = self.mae.forward_reconstruction_loss(images, out, mean=False)
                 # cls_loss = self.criterion(pred, labels)
 
                 loss = rec_loss
@@ -182,7 +185,8 @@ class SmartGlimpse(BaseArchitecture, MetricMixin):
                 # detach all gradients between MAE and RL
                 self._on_train_glimpse(state.detach().clone(),
                                        action.detach().clone(),
-                                       loss.detach().clone(), next_state.detach().clone())
+                                       prev_loss - loss.detach().clone(), next_state.detach().clone())
+            prev_loss = loss.detach().clone()
             state = next_state
 
         if self.training:
@@ -198,12 +202,12 @@ class SmartGlimpse(BaseArchitecture, MetricMixin):
         self.buffer.empty()
 
     def _on_train_glimpse(self, current_state, current_action,
-                          current_loss, current_next_state):
+                          current_reward, current_next_state):
 
         self.buffer.extend(TensorDict({
             'state': current_state,
             'action': current_action,
-            'reward': (-current_loss / 100),  # normalize rewards
+            'reward': (current_reward / 10),  # normalize rewards
             'next_state': current_next_state
         }, batch_size=current_state.shape[0]))
 
