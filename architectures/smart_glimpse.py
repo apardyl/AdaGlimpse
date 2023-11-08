@@ -81,7 +81,7 @@ class SmartGlimpse(BaseArchitecture, MetricMixin):
             min_lr=self.min_lr,
             epochs=self.epochs
         )
-        critic_optimizer = torch.optim.Adam(self.critic.parameters(), self.min_lr)
+        critic_optimizer = torch.optim.Adam(self.critic.parameters(), self.lr)
         critic_scheduler = MaeScheduler(
             optimizer=critic_optimizer,
             lr=self.lr,
