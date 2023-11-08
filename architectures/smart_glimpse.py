@@ -222,9 +222,6 @@ class SmartGlimpse(BaseArchitecture, MetricMixin):
                 sample['next_state'].to(images.device)
             )
 
-            critic_optimizer.zero_grad()
-            actor_optimizer.zero_grad()
-
             # optimize critic
             next_action = self.target_actor(next_state).detach()
             next_val = self.target_critic(next_state, next_action).detach()
@@ -232,7 +229,7 @@ class SmartGlimpse(BaseArchitecture, MetricMixin):
             predicted_val = self.critic(state, action)
             loss_critic = self.critic_loss(predicted_val, expected_val)
             assert torch.isfinite(loss_critic)
-            # loss_critic = torch.clip(loss_critic, -10, 10)  # prevent exploding gradient
+            critic_optimizer.zero_grad()
             loss_critic.backward()
             critic_optimizer.step()
             critic_losses.append(loss_critic.item())
@@ -241,7 +238,7 @@ class SmartGlimpse(BaseArchitecture, MetricMixin):
             predicted_action = self.actor(state)
             loss_actor = -1 * torch.mean(self.critic(state, predicted_action))
             assert torch.isfinite(loss_critic)
-            # loss_actor = torch.clip(loss_actor, -10, 10)  # prevent exploding gradient
+            actor_optimizer.zero_grad()
             loss_actor.backward()
             actor_optimizer.step()
             actor_losses.append(loss_actor.item())
