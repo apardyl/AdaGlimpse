@@ -16,7 +16,6 @@ from datasets.classification import BaseClassificationDataModule
 from datasets.patch_sampler import InteractiveSampler
 from datasets.utils import IMAGENET_MEAN, IMAGENET_STD
 
-
 class ElasticMae(BaseArchitecture, ABC):
     def __init__(self, datamodule: BaseDataModule, out_chans=3, pretrained_path=None, **kwargs):
         super().__init__(datamodule, **kwargs)
@@ -157,6 +156,24 @@ class AMEGlimpseElasticMae(_GlimpseElasticMaeReconstruction):
 
         self.patch_sampler_class = InteractiveSampler
         self.extractor = self.selection_map_extractor_class(self)
+        self._user_forward_hook = None
+
+    @property
+    def user_forward_hook(self):
+        return self._user_forward_hook
+
+    @user_forward_hook.setter
+    def user_forward_hook(self, hook):
+        self._user_forward_hook = hook
+
+    @user_forward_hook.deleter
+    def user_forward_hook(self):
+        self._user_forward_hook = None
+
+    def call_user_forward_hook(self, *args, **kwargs):
+        if self._user_forward_hook:
+            with torch.no_grad():
+                self._user_forward_hook(*args, **kwargs)
 
     def forward(self, batch, compute_loss=True):
         image = batch['image']
@@ -173,6 +190,8 @@ class AMEGlimpseElasticMae(_GlimpseElasticMaeReconstruction):
             selection_mask = self.extractor(sampler.patches, sampler.coords)
             next_glimpse = selector(selection_mask, sampler.coords)
             sampler.sample(next_glimpse)
+            self.call_user_forward_hook(step=step, out=out, next_glimpse=next_glimpse,
+                                        image=image, selection_mask=selection_mask, patches=sampler.patches)
 
         return {'out': out, 'loss': loss, 'coords': sampler.coords}
 
