@@ -9,7 +9,12 @@ from architectures.utils import MaeScheduler
 from datasets.base import BaseDataModule
 
 
-class BaseArchitecture(LightningModule, ABC):
+class AutoconfigLightningModule(LightningModule):
+    internal_data = False
+    checkpoint_metric = 'val/loss'
+
+
+class BaseArchitecture(AutoconfigLightningModule, ABC):
     def __init__(self, datamodule: BaseDataModule = None, lr=1.5e-4, min_lr=1e-8, warmup_epochs=10, weight_decay=0,
                  epochs=100, compile_model=True, **_):
         super().__init__()

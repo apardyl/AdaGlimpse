@@ -12,7 +12,7 @@ from torch.utils.data import RandomSampler, DataLoader
 class BaseDataModule(LightningDataModule, abc.ABC):
     has_test_data = True
 
-    def __init__(self, data_dir, train_batch_size=16, eval_batch_size=64, num_workers=4, num_samples=None,
+    def __init__(self, data_dir, train_batch_size=32, eval_batch_size=32, num_workers=8, num_samples=None,
                  image_size=(224, 224), force_no_augment=False, mem_fs=False, always_drop_last=False, **_):
         super().__init__()
 
@@ -47,15 +47,15 @@ class BaseDataModule(LightningDataModule, abc.ABC):
         parser.add_argument('--train-batch-size',
                             help='batch size for training',
                             type=int,
-                            default=16)
+                            default=32)
         parser.add_argument('--eval-batch-size',
                             help='batch size for validation and testing',
                             type=int,
-                            default=64)
+                            default=32)
         parser.add_argument('--num-workers',
                             help='dataloader workers per DDP process',
                             type=int,
-                            default=4)
+                            default=8)
         parser.add_argument('--num-samples',
                             help='number of images to sample in each training epoch',
                             type=int,

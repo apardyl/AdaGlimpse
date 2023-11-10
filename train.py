@@ -13,6 +13,7 @@ from lightning.pytorch.callbacks.progress.rich_progress import RichProgressBarTh
 from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
 from lightning.pytorch.strategies import DDPStrategy
 
+from architectures.base import AutoconfigLightningModule
 from utils.prepare import experiment_from_args
 
 random.seed(1)
@@ -23,19 +24,14 @@ torch.set_float32_matmul_precision('high')
 def define_args(parent_parser):
     parser = parent_parser.add_argument_group('train.py')
     parser.add_argument('--wandb',
-                        help='log to wandb',
-                        type=bool,
-                        default=False,
-                        action=argparse.BooleanOptionalAction)
-    parser.add_argument('--tensorboard',
-                        help='log to tensorboard',
+                        help='log to wandb (else use tensorboard)',
                         type=bool,
                         default=False,
                         action=argparse.BooleanOptionalAction)
     parser.add_argument('--fp16',
                         help='use 16 bit precision',
                         type=bool,
-                        default=True,
+                        default=False,
                         action=argparse.BooleanOptionalAction)
     parser.add_argument('--name',
                         help='experiment name',
@@ -46,10 +42,16 @@ def define_args(parent_parser):
                         type=bool,
                         default=False,
                         action=argparse.BooleanOptionalAction)
+    parser.add_argument('--test-only',
+                        help='perform only the validation step',
+                        type=bool,
+                        default=False,
+                        action=argparse.BooleanOptionalAction)
     return parent_parser
 
 
 def main():
+    model: AutoconfigLightningModule
     data_module, model, args = experiment_from_args(sys.argv, add_argparse_args_fn=define_args)
 
     plugins = []
@@ -60,13 +62,14 @@ def main():
     print('Run name:', run_name)
 
     loggers = []
-    if args.tensorboard:
-        loggers.append(TensorBoardLogger(save_dir='logs/', name=run_name))
+
     if args.wandb:
         loggers.append(WandbLogger(project='elastic_glimpse', entity="ideas_cv", name=run_name))
+    else:
+        loggers.append(TensorBoardLogger(save_dir='logs/', name=run_name))
 
     callbacks = [
-        ModelCheckpoint(dirpath=f"checkpoints/{run_name}", monitor="val/loss"),
+        ModelCheckpoint(dirpath=f"checkpoints/{run_name}", monitor=model.checkpoint_metric),
         RichProgressBar(leave=True, theme=RichProgressBarTheme(metrics_format='.2e')),
         RichModelSummary(max_depth=3),
         LearningRateMonitor(logging_interval='epoch')
@@ -105,13 +108,25 @@ def main():
                       benchmark=True,
                       log_every_n_steps=1)
 
+    if not model.internal_data:
+        kwargs = {
+            'model': model,
+            'datamodule': data_module
+        }
+    else:
+        kwargs = {
+            'model': model
+        }
+
     if args.validate_only:
-        trainer.validate(model=model, datamodule=data_module)
+        trainer.validate(**kwargs)
         return
 
-    trainer.fit(model=model, datamodule=data_module)
-    if data_module.has_test_data:
-        trainer.test(ckpt_path='best', datamodule=data_module)
+    if args.test_only:
+        trainer.test(**kwargs)
+        return
+
+    trainer.fit(**kwargs)
 
 
 if __name__ == "__main__":

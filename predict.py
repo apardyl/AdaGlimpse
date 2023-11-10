@@ -1,4 +1,3 @@
-import argparse
 import os.path
 import random
 import sys
@@ -6,11 +5,10 @@ import sys
 import numpy as np
 import torch
 import torchvision.datasets
-import torchvision.transforms as transforms
 from matplotlib import pyplot as plt
-from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+from architectures.base import AutoconfigLightningModule
 from utils.prepare import experiment_from_args
 
 random.seed(1)
@@ -37,6 +35,12 @@ def define_args(parent_parser):
         help="path to save visualizations to",
         type=str,
         default="predict_outputs",
+    )
+    parser.add_argument(
+        "--model-path",
+        help='path to a saved model state',
+        type=str,
+        required=True
     )
     return parent_parser
 
@@ -203,23 +207,20 @@ def visualize(args, model):
 
 
 def main():
+    model: AutoconfigLightningModule
     data_module, model, args = experiment_from_args(
         sys.argv, add_argparse_args_fn=define_args
     )
+
+    # todo: model loading logic & make to work with RL models.
+
     model.eval()
     model.user_forward_hook = UserHook()
-    augmentation = transforms.Compose(
-        [
-            transforms.ToTensor(),
-            transforms.Resize(args.image_size),
-            transforms.Lambda(lambda x: {"image": x}),
-        ]
-    )
-    images = torchvision.datasets.ImageFolder(args.data_dir, transform=augmentation)
-    images_loader = DataLoader(images, batch_size=args.batch_size, shuffle=False)
-    for idx, (image, cls) in enumerate(
-            tqdm(images_loader, total=min(len(images_loader), args.max_batches))
-    ):
+
+    data_module.setup('test')
+    images_loader = data_module.test_dataloader()
+
+    for idx, (image, cls) in enumerate(tqdm(images_loader, total=min(len(images_loader), args.max_batches))):
         if idx >= args.max_batches:
             break
         _ = model(image)

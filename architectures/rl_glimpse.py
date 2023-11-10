@@ -1,13 +1,14 @@
+import argparse
 import sys
 from typing import Tuple
 
 import torch
-from lightning import LightningModule
 from lightning.pytorch.utilities.types import EVAL_DATALOADERS, TRAIN_DATALOADERS
 from torchrl.data import ReplayBuffer, LazyTensorStorage
 from torchrl.envs.utils import ExplorationType, set_exploration_type
 from torchrl.objectives import SACLoss, SoftUpdate
 
+from architectures.base import AutoconfigLightningModule
 from architectures.mae import MaskedAutoencoderViT, mae_vit_base_patch16
 from architectures.rl.glimpse_game import GlimpseGameModelWrapper, GlimpseGameEnv, GlimpseGameDataCollector
 from architectures.rl.transformer_actor_critic import TransformerActorCritic
@@ -54,20 +55,27 @@ class MaeWrapper(GlimpseGameModelWrapper):
             return state, loss
 
 
-class RlMAE(LightningModule, MetricMixin):
+class RlMAE(AutoconfigLightningModule, MetricMixin):
+    internal_data = True
+    checkpoint_metric = 'val/mae_rmse'
+
     rl_state_dim = 768
     rl_hidden_dim = 256
     rl_action_dim = 3
 
-    def __init__(self, datamodule: BaseDataModule, pretrained_mae_path=None, num_glimpses=12,
-                 rl_iters_per_step=1, batch_size=32, epochs=10, init_random_batches=100, init_backbone_batches=50000,
-                 rl_batch_size=256, replay_buffer_size=10000, lr=3e-4, backbone_lr=1e-5) -> None:
+    def __init__(self, datamodule: BaseDataModule, pretrained_mae_path=None, num_glimpses=14,
+                 rl_iters_per_step=1, epochs=100, init_random_batches=100, init_backbone_batches=50000,
+                 rl_batch_size=64, replay_buffer_size=10000, lr=3e-4, backbone_lr=1e-5, **_) -> None:
         super().__init__()
 
         self.steps_per_epoch = None
         self.num_glimpses = num_glimpses
         self.rl_iters_per_step = rl_iters_per_step
-        self.batch_size = batch_size
+
+        self.batch_size = datamodule.train_batch_size
+        assert datamodule.train_batch_size == datamodule.eval_batch_size
+        datamodule.always_drop_last = True  # todo remove in future.
+
         self.rl_batch_size = rl_batch_size
         self.epochs = epochs
         self.init_random_batches = init_random_batches
@@ -104,11 +112,57 @@ class RlMAE(LightningModule, MetricMixin):
 
         self.replay_buffer = ReplayBuffer(
             storage=LazyTensorStorage(
-                max_size=replay_buffer_size
+                max_size=replay_buffer_size,
+                device='auto'
             ),
             prefetch=3,
             batch_size=self.rl_batch_size
         )
+
+    @classmethod
+    def add_argparse_args(cls, parent_parser):
+        parser = parent_parser.add_argument_group(RlMAE.__name__)
+        parser.add_argument('--lr',
+                            help='learning-rate',
+                            type=float,
+                            default=3e-4)
+        parser.add_argument('--backbone-lr',
+                            help='backbone learning-rate',
+                            type=float,
+                            default=1e-5)
+        parser.add_argument('--pretrained-mae-path',
+                            help='path to pretrained MAE weights',
+                            type=str,
+                            default='elastic_mae.ckpt')
+        parser.add_argument('--epochs',
+                            help='number of epochs',
+                            type=int,
+                            default=100)
+        parser.add_argument('--num-glimpses',
+                            help='number of glimpses to take',
+                            type=int,
+                            default=14)
+        parser.add_argument('--rl-iters-per-step',
+                            help='number of rl iterations per step',
+                            type=int,
+                            default=1)
+        parser.add_argument('--init-random-batches',
+                            help='number of random action batches on training start',
+                            type=int,
+                            default=100)
+        parser.add_argument('--init-backbone-batches',
+                            help='number of rl pre-training steps before starting to train the backbone',
+                            type=int,
+                            default=50000)
+        parser.add_argument('--rl-batch-size',
+                            help='batch size of the rl loop',
+                            type=int,
+                            default=64)
+        parser.add_argument('--replay-buffer-size',
+                            help='rl replay buffer size in episodes',
+                            type=int,
+                            default=10000)
+        return parent_parser
 
     def configure_optimizers(self):
         critic_params = list(self.rl_loss_module.qvalue_network_params.flatten_keys().values())
@@ -250,7 +304,7 @@ class RlMAE(LightningModule, MetricMixin):
         scheduler_backbone.step()
 
         data_view = tensordict_data.reshape(-1)
-        self.replay_buffer.extend(data_view.cpu())
+        self.replay_buffer.extend(data_view)
 
         optimizer_actor, optimizer_critic, optimizer_alpha, optimizer_backbone = self.optimizers()
 

@@ -2,3 +2,4 @@ from .elastic_mae import ElasticMae, SimpleAMEGlimpseElasticMae, DivideFourGlimp
     StamlikeSaliencyGlimpseElasticMae, DivideFourSaliencyGlimpseElasticMae, ClsStamlikeSaliencyGlimpseElasticMae, \
     ClsDivideFourSaliencyGlimpseElasticMae, HybridElasticMae
 from .saliency_predictor import SaliencyPredictor
+from .rl_glimpse import RlMAE

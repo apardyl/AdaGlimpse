@@ -8,7 +8,7 @@ import datasets
 
 
 def experiment_from_args(argv, prog_name='TrainWhereToLookNext',
-                         add_argparse_args_fn=None, modify_args_fn=None, no_aug=False):
+                         add_argparse_args_fn=None, modify_args_fn=None):
     parser = argparse.ArgumentParser(
         prog=prog_name
     )
