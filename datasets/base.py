@@ -13,7 +13,7 @@ class BaseDataModule(LightningDataModule, abc.ABC):
     has_test_data = True
 
     def __init__(self, data_dir, train_batch_size=16, eval_batch_size=64, num_workers=4, num_samples=None,
-                 image_size=(224, 224), force_no_augment=False, mem_fs=False, **_):
+                 image_size=(224, 224), force_no_augment=False, mem_fs=False, always_drop_last=False, **_):
         super().__init__()
 
         self.data_dir = data_dir
@@ -23,6 +23,7 @@ class BaseDataModule(LightningDataModule, abc.ABC):
         self.num_samples = num_samples
         self.image_size = image_size
         self.force_no_augment = force_no_augment
+        self.always_drop_last = always_drop_last
 
         self.train_dataset = None
         self.test_dataset = None
@@ -83,12 +84,12 @@ class BaseDataModule(LightningDataModule, abc.ABC):
     def test_dataloader(self) -> EVAL_DATALOADERS:
         print(f'Loaded {len(self.test_dataset)} test samples', file=sys.stderr)
         return DataLoader(self.test_dataset, batch_size=self.eval_batch_size, shuffle=False,
-                          num_workers=self.num_workers, pin_memory=True)
+                          num_workers=self.num_workers, pin_memory=True, drop_last=self.always_drop_last)
 
     def val_dataloader(self) -> EVAL_DATALOADERS:
         print(f'Loaded {len(self.val_dataset)} val samples', file=sys.stderr)
         return DataLoader(self.val_dataset, batch_size=self.eval_batch_size, shuffle=False,
-                          num_workers=self.num_workers, pin_memory=True)
+                          num_workers=self.num_workers, pin_memory=True, drop_last=self.always_drop_last)
 
     def _load_to_memfs(self):
         raise NotImplemented()

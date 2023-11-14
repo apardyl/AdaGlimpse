@@ -4,6 +4,8 @@ from typing import Dict, Callable, Collection
 import torch
 import torch.nn as nn
 
+from datasets.utils import IMAGENET_MEAN, IMAGENET_STD
+
 
 class MaeScheduler(nn.Module):
     # Copyright (c) Meta Platforms, Inc. and affiliates.
@@ -78,3 +80,9 @@ def hard_update(source, target):
     """
     for target_param, param in zip(target.parameters(), source.parameters()):
         target_param.data.copy_(param.data)
+
+
+def rev_normalize(img):
+    return torch.clip(
+        (img * torch.tensor(IMAGENET_MEAN).reshape(1, 3, 1, 1).to(img.device) + torch.tensor(IMAGENET_STD).reshape(1, 3, 1, 1).to(img.device)) * 255,
+        0, 255)

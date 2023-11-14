@@ -102,7 +102,8 @@ def main():
                       num_nodes=num_nodes,
                       devices=devices,
                       precision=precision,
-                      benchmark=True)
+                      benchmark=True,
+                      log_every_n_steps=1)
 
     if args.validate_only:
         trainer.validate(model=model, datamodule=data_module)
