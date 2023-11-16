@@ -1,5 +1,4 @@
 import sys
-from collections import defaultdict
 from typing import Optional
 
 import torch
@@ -9,12 +8,10 @@ from torch import nn, optim
 from torchrl.collectors import SyncDataCollector
 from torchrl.data import BoundedTensorSpec, UnboundedContinuousTensorSpec, CompositeSpec, DiscreteTensorSpec, \
     ReplayBuffer, LazyTensorStorage
-from torchrl.data.replay_buffers import SamplerWithoutReplacement
 from torchrl.envs import EnvBase
 from torchrl.envs.utils import ExplorationType, set_exploration_type
 from torchrl.modules import ProbabilisticActor, TanhNormal, ValueOperator
-from torchrl.objectives import ClipPPOLoss, SACLoss, SoftUpdate
-from torchrl.objectives.value import GAE
+from torchrl.objectives import SACLoss, SoftUpdate
 from tqdm import tqdm
 
 from architectures.glimpse_selectors import ElasticAttentionMapEntropy
@@ -32,16 +29,20 @@ class ActorCritic(nn.Module):
             def __init__(self):
                 super().__init__()
                 self.observation_net = nn.Sequential(
-                    nn.Linear(input_dim, input_dim),
-                    nn.Tanh(),
+                    nn.Linear(input_dim, hidden_dim),
+                    nn.ReLU(),
                 )
                 self.step_net = nn.Sequential(
-                    nn.Linear(num_glimpses, hidden_dim - input_dim),
-                    nn.Tanh(),
+                    nn.Linear(num_glimpses, hidden_dim // 2),
+                    nn.ReLU(),
                 )
                 self.actor_net = nn.Sequential(
+                    nn.Linear(3 * hidden_dim // 2, hidden_dim),
+                    nn.ReLU(),
                     nn.Linear(hidden_dim, hidden_dim),
-                    nn.Tanh(),
+                    nn.ReLU(),
+                    nn.Linear(hidden_dim, hidden_dim),
+                    nn.ReLU(),
                     nn.Linear(hidden_dim, 2 * action_dim),
                     NormalParamExtractor(scale_mapping="biased_softplus_0.5"),
                 )
@@ -78,22 +79,24 @@ class ActorCritic(nn.Module):
             def __init__(self):
                 super().__init__()
                 self.observation_net = nn.Sequential(
-                    nn.Linear(input_dim, input_dim),
-                    nn.Tanh(),
+                    nn.Linear(input_dim, hidden_dim),
+                    nn.ReLU(),
                 )
                 self.step_net = nn.Sequential(
-                    nn.Linear(num_glimpses, hidden_dim - input_dim),
-                    nn.Tanh(),
+                    nn.Linear(num_glimpses, hidden_dim // 2),
+                    nn.ReLU(),
                 )
                 self.action_net = nn.Sequential(
-                    nn.Linear(action_dim, hidden_dim),
-                    nn.Tanh()
+                    nn.Linear(action_dim, hidden_dim // 2),
+                    nn.ReLU()
                 )
                 self.value_net = nn.Sequential(
                     nn.Linear(2 * hidden_dim, hidden_dim),
-                    nn.Tanh(),
+                    nn.ReLU(),
                     nn.Linear(hidden_dim, hidden_dim),
-                    nn.Tanh(),
+                    nn.ReLU(),
+                    nn.Linear(hidden_dim, hidden_dim),
+                    nn.ReLU(),
                     nn.Linear(hidden_dim, 1),
                 )
 
@@ -210,32 +213,27 @@ class GlimpseGameEnv(EnvBase):
                 raise
 
         self.images = batch['image'].to(self.device)
-        self.sampler = self.patch_sampler_class(self.images, init_grid=True)
+        self.sampler = self.patch_sampler_class(self.images, init_grid=False)
 
         with torch.no_grad():
             latent = self.mae.forward_encoder(self.sampler.patches, coords=self.sampler.coords)
             out = self.mae.forward_decoder(latent)
-            # self.current_error = self.mae.forward_reconstruction_loss(self.images, out, mean=False).detach().clone()
             self.current_error = self._calculate_loss(out)
             self.current_state = self.extractor().reshape(self.images.shape[0], -1)
 
         return TensorDict({
             'observation': self.current_state,
             'step': torch.ones_like(self.current_error, dtype=torch.long) * self.n_step,
-            # 'reward': torch.zeros_like(self.current_error),
             'mae_loss': self.current_error,
-            # 'done': torch.zeros_like(self.current_error, dtype=torch.bool)
         }, batch_size=self.images.shape[0], device=self.device)
 
     def _step(self, tensordict: TensorDictBase) -> TensorDictBase:
         action = tensordict['action']
-        # action = (action + 1) / 2
         self.sampler.sample_multi_relative(new_crops=action, grid_size=2)
 
         with torch.no_grad():
             latent = self.mae.forward_encoder(self.sampler.patches, coords=self.sampler.coords)
             out = self.mae.forward_decoder(latent)
-            # loss = self.mae.forward_reconstruction_loss(self.images, out, mean=False)
             loss = self._calculate_loss(out)
             self.current_state = self.extractor().reshape(self.images.shape[0], -1)
 
@@ -272,7 +270,7 @@ def train(base_env, env, model, loss_module, train_loader, target_net_updater):
     iter_batch_size = 256
     init_random_frames = iter_batch_size * 100
 
-    lr = 3.0e-4
+    lr = 1.0e-3
     weight_decay = 0.0
     adam_eps = 1.0e-8
 
@@ -302,15 +300,26 @@ def train(base_env, env, model, loss_module, train_loader, target_net_updater):
         weight_decay=weight_decay,
         eps=adam_eps,
     )
+    scheduler_actor = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer_actor, total_frames // frames_per_batch, 1e-8
+    )
     optimizer_critic = optim.Adam(
         critic_params,
         lr=lr,
         weight_decay=weight_decay,
         eps=adam_eps,
     )
+    scheduler_critic = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer_critic, total_frames // frames_per_batch, 1e-8
+    )
     optimizer_alpha = optim.Adam(
         [loss_module.log_alpha],
-        lr=3.0e-4,
+        lr=lr,
+        weight_decay=weight_decay,
+        eps=adam_eps,
+    )
+    scheduler_alpha = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer_alpha, total_frames // frames_per_batch, 1e-8
     )
 
     pbar = tqdm(total=total_frames)
@@ -350,15 +359,13 @@ def train(base_env, env, model, loss_module, train_loader, target_net_updater):
 
                 target_net_updater.step()
 
-                reward_str = (
-                    f"average reward={tensordict_data['next', 'reward'].mean().item(): 4.4f}"
-                )
-
                 pbar.set_description(", ".join(
-                    [reward_str,
-                     f'actor loss {actor_loss.mean().item()}', f'qvalue loss {q_loss.mean().item()}',
-                     f'alpha loss {alpha_loss.mean().item()}', f'f_rmse {base_env.last_final_rmse}']))
-
+                    [f'actor loss {actor_loss.mean().item()}', f'qvalue loss {q_loss.mean().item()}',
+                     f'alpha loss {alpha_loss.mean().item()}', f'f_rmse {base_env.last_final_rmse}',
+                     f'lr {optimizer_actor.param_groups[0]["lr"]}']))
+        scheduler_actor.step()
+        scheduler_critic.step()
+        scheduler_alpha.step()
     torch.save(model.state_dict(), 'ppo5.pth')
 
 
@@ -379,15 +386,10 @@ def validate(base_env, env, model, val_loader):
 
 if __name__ == '__main__':
     batch_size = 32
-    gamma = 0.5
-    lmbda = 0.95
-    entropy_eps = 1e-4
-    clip_epsilon = 0.2
 
-    base_env = GlimpseGameEnv(num_glimpses=11, image_size=(224, 224), pretrained_mae_path='../elastic_mae.ckpt',
+    base_env = GlimpseGameEnv(num_glimpses=12, image_size=(224, 224), pretrained_mae_path='../elastic_mae.ckpt',
                               batch_size=batch_size).to('cuda')
-    # transform = Compose(VecNorm(in_keys=['observation']))
-    # env = TransformedEnv(base_env, transform)
+
     env = base_env
     data = ImageNet1k(data_dir='/home/adam/datasets/imagenet', train_batch_size=batch_size, eval_batch_size=batch_size,
                       num_workers=8, always_drop_last=True)
