@@ -4,8 +4,8 @@ from typing import Optional
 
 import torch
 from tensordict import TensorDictBase, TensorDict
-from tensordict.nn import NormalParamExtractor, TensorDictModule
-from torch import nn
+from tensordict.nn import NormalParamExtractor, TensorDictModule, InteractionType
+from torch import nn, optim
 from torchrl.collectors import SyncDataCollector
 from torchrl.data import BoundedTensorSpec, UnboundedContinuousTensorSpec, CompositeSpec, DiscreteTensorSpec, \
     ReplayBuffer, LazyTensorStorage
@@ -13,7 +13,7 @@ from torchrl.data.replay_buffers import SamplerWithoutReplacement
 from torchrl.envs import EnvBase
 from torchrl.envs.utils import ExplorationType, set_exploration_type
 from torchrl.modules import ProbabilisticActor, TanhNormal, ValueOperator
-from torchrl.objectives import ClipPPOLoss
+from torchrl.objectives import ClipPPOLoss, SACLoss, SoftUpdate
 from torchrl.objectives.value import GAE
 from tqdm import tqdm
 
@@ -42,10 +42,8 @@ class ActorCritic(nn.Module):
                 self.actor_net = nn.Sequential(
                     nn.Linear(hidden_dim, hidden_dim),
                     nn.Tanh(),
-                    nn.Linear(hidden_dim, hidden_dim),
-                    nn.Tanh(),
                     nn.Linear(hidden_dim, 2 * action_dim),
-                    NormalParamExtractor(),
+                    NormalParamExtractor(scale_mapping="biased_softplus_0.5"),
                 )
 
             def forward(self, observation, step):
@@ -62,20 +60,21 @@ class ActorCritic(nn.Module):
                 out_keys=["loc", "scale"]
             ),
             spec=BoundedTensorSpec(
-                minimum=-1,
+                minimum=0,
                 maximum=1,
                 shape=action_dim
             ),
             in_keys=["loc", "scale"],
             distribution_class=TanhNormal,
             distribution_kwargs={
-                "min": -1,
+                "min": 0,
                 "max": 1,
             },
-            return_log_prob=True,
+            return_log_prob=False,
+            default_interaction_type=InteractionType.RANDOM
         )
 
-        class ValueNet(nn.Module):
+        class QValueNet(nn.Module):
             def __init__(self):
                 super().__init__()
                 self.observation_net = nn.Sequential(
@@ -86,26 +85,30 @@ class ActorCritic(nn.Module):
                     nn.Linear(num_glimpses, hidden_dim - input_dim),
                     nn.Tanh(),
                 )
+                self.action_net = nn.Sequential(
+                    nn.Linear(action_dim, hidden_dim),
+                    nn.Tanh()
+                )
                 self.value_net = nn.Sequential(
-                    nn.Linear(hidden_dim, hidden_dim),
+                    nn.Linear(2 * hidden_dim, hidden_dim),
                     nn.Tanh(),
                     nn.Linear(hidden_dim, hidden_dim),
                     nn.Tanh(),
                     nn.Linear(hidden_dim, 1),
                 )
 
-            def forward(self, observation, step):
+            def forward(self, observation, step, action):
                 observation = self.observation_net(observation)
                 step = torch.nn.functional.one_hot(step.clip(0, num_glimpses - 1), num_classes=num_glimpses).to(
                     observation.dtype)
                 step = self.step_net(step.squeeze(1))
-                return self.value_net(torch.cat([observation, step], dim=-1))
+                action = self.action_net(action)
+                return self.value_net(torch.cat([observation, step, action], dim=-1))
 
-        self.value_module = ValueOperator(
-            module=ValueNet(),
-            in_keys=["observation", "step"],
+        self.qvalue_module = ValueOperator(
+            module=QValueNet(),
+            in_keys=["observation", "step", "action"],
         )
-
 
 
 class GlimpseGameEnv(EnvBase):
@@ -130,7 +133,7 @@ class GlimpseGameEnv(EnvBase):
             mae_loss=UnboundedContinuousTensorSpec(shape=torch.Size((batch_size, 1))),
             shape=self.batch_size
         )
-        self.action_spec = BoundedTensorSpec(low=-1., high=1., shape=torch.Size((batch_size, self.action_dim)))
+        self.action_spec = BoundedTensorSpec(low=0., high=1., shape=torch.Size((batch_size, self.action_dim)))
         self.reward_spec = UnboundedContinuousTensorSpec(shape=torch.Size((batch_size, 1)))
 
         print(self._load_pretrained_elastic(pretrained_mae_path), file=sys.stderr)
@@ -219,14 +222,14 @@ class GlimpseGameEnv(EnvBase):
         return TensorDict({
             'observation': self.current_state,
             'step': torch.ones_like(self.current_error, dtype=torch.long) * self.n_step,
-            'reward': torch.zeros_like(self.current_error),
+            # 'reward': torch.zeros_like(self.current_error),
             'mae_loss': self.current_error,
-            'done': torch.zeros_like(self.current_error, dtype=torch.bool)
+            # 'done': torch.zeros_like(self.current_error, dtype=torch.bool)
         }, batch_size=self.images.shape[0], device=self.device)
 
     def _step(self, tensordict: TensorDictBase) -> TensorDictBase:
         action = tensordict['action']
-        action = (action + 1) / 2
+        # action = (action + 1) / 2
         self.sampler.sample_multi_relative(new_crops=action, grid_size=2)
 
         with torch.no_grad():
@@ -234,7 +237,6 @@ class GlimpseGameEnv(EnvBase):
             out = self.mae.forward_decoder(latent)
             # loss = self.mae.forward_reconstruction_loss(self.images, out, mean=False)
             loss = self._calculate_loss(out)
-
             self.current_state = self.extractor().reshape(self.images.shape[0], -1)
 
         reward = self.current_error - loss
@@ -258,77 +260,106 @@ class GlimpseGameEnv(EnvBase):
         pass
 
 
-def train(base_env, env, model, advantage_module, loss_module, train_loader):
+def train(base_env, env, model, loss_module, train_loader, target_net_updater):
     base_env.set_dataloader(train_loader)
 
     model.train()
 
     total_frames = 1000000
-    num_epochs = 1
-    num_iters = 1
+    num_iters = 8
     frames_per_batch = 32
-    iter_batch_size = 32
-    max_grad_norm = 1.0
+    buffer_size = 100000
+    iter_batch_size = 256
+    init_random_frames = iter_batch_size * 100
+
+    lr = 3.0e-4
+    weight_decay = 0.0
+    adam_eps = 1.0e-8
 
     collector = SyncDataCollector(
         env,
         model.policy_module,
         frames_per_batch=frames_per_batch,
         total_frames=total_frames,
-        split_trajs=False,
         device='cuda',
+        init_random_frames=init_random_frames
     )
 
     replay_buffer = ReplayBuffer(
-        storage=LazyTensorStorage(frames_per_batch),  # * 100 * 12),
-        sampler=SamplerWithoutReplacement(),
+        storage=LazyTensorStorage(
+            max_size=buffer_size
+        ),
+        prefetch=3,
+        batch_size=iter_batch_size
     )
 
-    optim = torch.optim.Adam(loss_module.parameters(), 0.001)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optim, total_frames // frames_per_batch, 0.0
+    critic_params = list(loss_module.qvalue_network_params.flatten_keys().values())
+    actor_params = list(loss_module.actor_network_params.flatten_keys().values())
+
+    optimizer_actor = optim.Adam(
+        actor_params,
+        lr=lr,
+        weight_decay=weight_decay,
+        eps=adam_eps,
+    )
+    optimizer_critic = optim.Adam(
+        critic_params,
+        lr=lr,
+        weight_decay=weight_decay,
+        eps=adam_eps,
+    )
+    optimizer_alpha = optim.Adam(
+        [loss_module.log_alpha],
+        lr=3.0e-4,
     )
 
-    logs = defaultdict(list)
     pbar = tqdm(total=total_frames)
 
     for i, tensordict_data in enumerate(collector):
-        for _ in range(num_epochs):
-            # We'll need an "advantage" signal to make PPO work.
-            # We re-compute it at each epoch as its value depends on the value
-            # network which is updated in the inner loop.
-            with torch.no_grad():
-                advantage_module(tensordict_data)
-            data_view = tensordict_data.reshape(-1)
-            replay_buffer.extend(data_view.cpu())
+        collector.update_policy_weights_()
+
+        data_view = tensordict_data.reshape(-1)
+        replay_buffer.extend(data_view.cpu())
+
+        pbar.update(tensordict_data.numel())
+
+        if len(replay_buffer) > init_random_frames:
             for _ in range(num_iters):
-                subdata = replay_buffer.sample(iter_batch_size)
-                loss_vals = loss_module(subdata.to('cuda'))
-                loss_value = (
-                        loss_vals["loss_objective"]
-                        + loss_vals["loss_critic"]
-                        + loss_vals["loss_entropy"]
+                subdata = replay_buffer.sample()
+                loss_td = loss_module(subdata.to('cuda'))
+
+                actor_loss = loss_td["loss_actor"]
+                q_loss = loss_td["loss_qvalue"]
+                alpha_loss = loss_td["loss_alpha"]
+
+                # torch.nn.utils.clip_grad_norm_(loss_module.parameters(), max_grad_norm)
+                # Update actor
+                optimizer_actor.zero_grad()
+                actor_loss.backward()
+                optimizer_actor.step()
+
+                # Update critic
+                optimizer_critic.zero_grad()
+                q_loss.backward()
+                optimizer_critic.step()
+
+                # Update alpha
+                optimizer_alpha.zero_grad()
+                alpha_loss.backward()
+                optimizer_alpha.step()
+
+                target_net_updater.step()
+
+                reward_str = (
+                    f"average reward={tensordict_data['next', 'reward'].mean().item(): 4.4f}"
                 )
 
-                loss_value.backward()
-                torch.nn.utils.clip_grad_norm_(loss_module.parameters(), max_grad_norm)
-                optim.step()
-                optim.zero_grad()
+                pbar.set_description(", ".join(
+                    [reward_str,
+                     f'actor loss {actor_loss.mean().item()}', f'qvalue loss {q_loss.mean().item()}',
+                     f'alpha loss {alpha_loss.mean().item()}', f'f_rmse {base_env.last_final_rmse}']))
 
-        logs["reward"].append(tensordict_data["next", "reward"].mean().item())
-        pbar.update(tensordict_data.numel())
-        cum_reward_str = (
-            f"average reward={logs['reward'][-1]: 4.4f} (init={logs['reward'][0]: 4.4f})"
-        )
-        logs["lr"].append(optim.param_groups[0]["lr"])
-        lr_str = f"lr policy: {logs['lr'][-1]: .3e}"
-
-        pbar.set_description(", ".join(
-            [cum_reward_str, lr_str, f'loss {loss_value.item()}', f'f_rmse {base_env.last_final_rmse}']))
-
-        scheduler.step()
-
-    torch.save(model.state_dict(), 'ppo4.pth')
+    torch.save(model.state_dict(), 'ppo5.pth')
 
 
 def validate(base_env, env, model, val_loader):
@@ -366,21 +397,11 @@ if __name__ == '__main__':
 
     model = ActorCritic().to('cuda')
 
-    advantage_module = GAE(
-        gamma=gamma, lmbda=lmbda, value_network=model.value_module, average_gae=True
-    )
+    loss_module = SACLoss(actor_network=model.policy_module, qvalue_network=model.qvalue_module,
+                          loss_function='smooth_l1', delay_actor=False,
+                          delay_qvalue=True, alpha_init=1.0)
+    loss_module.make_value_estimator(gamma=0.99)
+    target_net_updater = SoftUpdate(loss_module, eps=0.995)
 
-    loss_module = ClipPPOLoss(
-        actor=model.policy_module,
-        critic=model.value_module,
-        clip_epsilon=clip_epsilon,
-        entropy_bonus=bool(entropy_eps),
-        entropy_coef=entropy_eps,
-        value_target_key=advantage_module.value_target_key,
-        critic_coef=1.0,
-        gamma=gamma,
-        loss_critic_type="smooth_l1",
-    )
-
-    train(base_env, env, model, advantage_module, loss_module, train_loader)
+    train(base_env, env, model, loss_module, train_loader, target_net_updater)
     validate(base_env, env, model, val_loader)
