@@ -10,7 +10,7 @@ from torchrl.collectors import SyncDataCollector
 from torchrl.data import BoundedTensorSpec, UnboundedContinuousTensorSpec, CompositeSpec, DiscreteTensorSpec, \
     ReplayBuffer, LazyTensorStorage
 from torchrl.data.replay_buffers import SamplerWithoutReplacement
-from torchrl.envs import EnvBase, TransformedEnv, VecNorm, Compose
+from torchrl.envs import EnvBase
 from torchrl.envs.utils import ExplorationType, set_exploration_type
 from torchrl.modules import ProbabilisticActor, TanhNormal, ValueOperator
 from torchrl.objectives import ClipPPOLoss
@@ -24,9 +24,8 @@ from datasets import ImageNet1k
 from datasets.patch_sampler import InteractiveSampler
 
 
-class PPOActorCritic(nn.Module):
-    def __init__(self, input_dim=196, hidden_dim=256, action_dim=3, gamma=0.99, lmbda=0.95, entropy_eps=1e-4,
-                 clip_epsilon=0.2, num_glimpses=12):
+class ActorCritic(nn.Module):
+    def __init__(self, input_dim=196, hidden_dim=256, action_dim=3, num_glimpses=12):
         super().__init__()
 
         class ActorNet(nn.Module):
@@ -63,14 +62,14 @@ class PPOActorCritic(nn.Module):
                 out_keys=["loc", "scale"]
             ),
             spec=BoundedTensorSpec(
-                minimum=0,
+                minimum=-1,
                 maximum=1,
                 shape=action_dim
             ),
             in_keys=["loc", "scale"],
             distribution_class=TanhNormal,
             distribution_kwargs={
-                "min": 0,
+                "min": -1,
                 "max": 1,
             },
             return_log_prob=True,
@@ -102,26 +101,11 @@ class PPOActorCritic(nn.Module):
                 step = self.step_net(step.squeeze(1))
                 return self.value_net(torch.cat([observation, step], dim=-1))
 
-        value_module = ValueOperator(
+        self.value_module = ValueOperator(
             module=ValueNet(),
             in_keys=["observation", "step"],
         )
 
-        self.advantage_module = GAE(
-            gamma=gamma, lmbda=lmbda, value_network=value_module, average_gae=True
-        )
-
-        self.loss_module = ClipPPOLoss(
-            actor=self.policy_module,
-            critic=value_module,
-            clip_epsilon=clip_epsilon,
-            entropy_bonus=bool(entropy_eps),
-            entropy_coef=entropy_eps,
-            value_target_key=self.advantage_module.value_target_key,
-            critic_coef=1.0,
-            gamma=gamma,
-            loss_critic_type="smooth_l1",
-        )
 
 
 class GlimpseGameEnv(EnvBase):
@@ -146,7 +130,7 @@ class GlimpseGameEnv(EnvBase):
             mae_loss=UnboundedContinuousTensorSpec(shape=torch.Size((batch_size, 1))),
             shape=self.batch_size
         )
-        self.action_spec = BoundedTensorSpec(low=0., high=1., shape=torch.Size((batch_size, self.action_dim)))
+        self.action_spec = BoundedTensorSpec(low=-1., high=1., shape=torch.Size((batch_size, self.action_dim)))
         self.reward_spec = UnboundedContinuousTensorSpec(shape=torch.Size((batch_size, 1)))
 
         print(self._load_pretrained_elastic(pretrained_mae_path), file=sys.stderr)
@@ -223,7 +207,7 @@ class GlimpseGameEnv(EnvBase):
                 raise
 
         self.images = batch['image'].to(self.device)
-        self.sampler = self.patch_sampler_class(self.images, init_grid=False)
+        self.sampler = self.patch_sampler_class(self.images, init_grid=True)
 
         with torch.no_grad():
             latent = self.mae.forward_encoder(self.sampler.patches, coords=self.sampler.coords)
@@ -242,6 +226,7 @@ class GlimpseGameEnv(EnvBase):
 
     def _step(self, tensordict: TensorDictBase) -> TensorDictBase:
         action = tensordict['action']
+        action = (action + 1) / 2
         self.sampler.sample_multi_relative(new_crops=action, grid_size=2)
 
         with torch.no_grad():
@@ -273,13 +258,12 @@ class GlimpseGameEnv(EnvBase):
         pass
 
 
-def train(base_env, env, ppo, train_loader):
+def train(base_env, env, model, advantage_module, loss_module, train_loader):
     base_env.set_dataloader(train_loader)
 
-    ppo.train()
+    model.train()
 
     total_frames = 1000000
-    frame_skip = 1
     num_epochs = 1
     num_iters = 1
     frames_per_batch = 32
@@ -288,7 +272,7 @@ def train(base_env, env, ppo, train_loader):
 
     collector = SyncDataCollector(
         env,
-        ppo.policy_module,
+        model.policy_module,
         frames_per_batch=frames_per_batch,
         total_frames=total_frames,
         split_trajs=False,
@@ -300,13 +284,13 @@ def train(base_env, env, ppo, train_loader):
         sampler=SamplerWithoutReplacement(),
     )
 
-    optim = torch.optim.Adam(ppo.loss_module.parameters(), 0.001)
+    optim = torch.optim.Adam(loss_module.parameters(), 0.001)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optim, total_frames // frames_per_batch, 0.0
     )
 
     logs = defaultdict(list)
-    pbar = tqdm(total=total_frames * frame_skip)
+    pbar = tqdm(total=total_frames)
 
     for i, tensordict_data in enumerate(collector):
         for _ in range(num_epochs):
@@ -314,12 +298,12 @@ def train(base_env, env, ppo, train_loader):
             # We re-compute it at each epoch as its value depends on the value
             # network which is updated in the inner loop.
             with torch.no_grad():
-                ppo.advantage_module(tensordict_data)
+                advantage_module(tensordict_data)
             data_view = tensordict_data.reshape(-1)
             replay_buffer.extend(data_view.cpu())
             for _ in range(num_iters):
                 subdata = replay_buffer.sample(iter_batch_size)
-                loss_vals = ppo.loss_module(subdata.to('cuda'))
+                loss_vals = loss_module(subdata.to('cuda'))
                 loss_value = (
                         loss_vals["loss_objective"]
                         + loss_vals["loss_critic"]
@@ -327,12 +311,12 @@ def train(base_env, env, ppo, train_loader):
                 )
 
                 loss_value.backward()
-                torch.nn.utils.clip_grad_norm_(ppo.loss_module.parameters(), max_grad_norm)
+                torch.nn.utils.clip_grad_norm_(loss_module.parameters(), max_grad_norm)
                 optim.step()
                 optim.zero_grad()
 
         logs["reward"].append(tensordict_data["next", "reward"].mean().item())
-        pbar.update(tensordict_data.numel() * frame_skip)
+        pbar.update(tensordict_data.numel())
         cum_reward_str = (
             f"average reward={logs['reward'][-1]: 4.4f} (init={logs['reward'][0]: 4.4f})"
         )
@@ -344,18 +328,18 @@ def train(base_env, env, ppo, train_loader):
 
         scheduler.step()
 
-    torch.save(ppo.state_dict(), 'ppo4.pth')
+    torch.save(model.state_dict(), 'ppo4.pth')
 
 
-def validate(base_env, env, ppo, val_loader):
-    ppo.eval()
+def validate(base_env, env, model, val_loader):
+    model.eval()
 
     base_env.set_dataloader(val_loader, auto_reset_dataloader=False)
 
     score = []
 
     with set_exploration_type(ExplorationType.MEAN), torch.no_grad():
-        for eval_rollout in tqdm(env.iterate_with_policy(ppo.policy_module)):
+        for eval_rollout in tqdm(env.iterate_with_policy(model.policy_module)):
             mean_mae_loss = eval_rollout['mae_loss'][:, -1].mean().item()
             score.append(mean_mae_loss)
 
@@ -364,6 +348,10 @@ def validate(base_env, env, ppo, val_loader):
 
 if __name__ == '__main__':
     batch_size = 32
+    gamma = 0.5
+    lmbda = 0.95
+    entropy_eps = 1e-4
+    clip_epsilon = 0.2
 
     base_env = GlimpseGameEnv(num_glimpses=11, image_size=(224, 224), pretrained_mae_path='../elastic_mae.ckpt',
                               batch_size=batch_size).to('cuda')
@@ -376,7 +364,23 @@ if __name__ == '__main__':
     train_loader = data.train_dataloader()
     val_loader = data.val_dataloader()
 
-    ppo = PPOActorCritic().to('cuda')
+    model = ActorCritic().to('cuda')
 
-    train(base_env, env, ppo, train_loader)
-    validate(base_env, env, ppo, val_loader)
+    advantage_module = GAE(
+        gamma=gamma, lmbda=lmbda, value_network=model.value_module, average_gae=True
+    )
+
+    loss_module = ClipPPOLoss(
+        actor=model.policy_module,
+        critic=model.value_module,
+        clip_epsilon=clip_epsilon,
+        entropy_bonus=bool(entropy_eps),
+        entropy_coef=entropy_eps,
+        value_target_key=advantage_module.value_target_key,
+        critic_coef=1.0,
+        gamma=gamma,
+        loss_critic_type="smooth_l1",
+    )
+
+    train(base_env, env, model, advantage_module, loss_module, train_loader)
+    validate(base_env, env, model, val_loader)
