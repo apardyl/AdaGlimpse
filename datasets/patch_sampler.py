@@ -113,7 +113,7 @@ class InteractiveSampler:
         # B x (y, x, s)
         new_crops = new_crops.detach().clone()
         max_crop_size = (
-                    min(self._images.shape[-2], self._images.shape[-1]) / 2)  # half image (we did not train for more)
+                min(self._images.shape[-2], self._images.shape[-1]) / 2)  # half image (we did not train for more)
         min_crop_size = min(self._native_patch_size) * grid_size
 
         new_crops[..., 2] = new_crops[..., 2] * (max_crop_size - min_crop_size) + min_crop_size
@@ -186,6 +186,10 @@ class InteractiveSampler:
     @property
     def coords(self):
         return self._coords
+
+    @property
+    def images(self):
+        return self._images
 
     @property
     def num_patches(self):
