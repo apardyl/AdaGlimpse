@@ -3,7 +3,7 @@ from typing import Tuple
 
 import torch
 from lightning import LightningModule
-from lightning.pytorch.utilities.types import EVAL_DATALOADERS, TRAIN_DATALOADERS, STEP_OUTPUT
+from lightning.pytorch.utilities.types import EVAL_DATALOADERS, TRAIN_DATALOADERS
 from torchrl.data import ReplayBuffer, LazyTensorStorage
 from torchrl.envs.utils import ExplorationType, set_exploration_type
 from torchrl.objectives import SACLoss, SoftUpdate
@@ -12,7 +12,7 @@ from architectures.glimpse_selectors import ElasticAttentionMapEntropy
 from architectures.mae import MaskedAutoencoderViT, mae_vit_base_patch16
 from architectures.rl.actor_critic import ActorCritic
 from architectures.rl.glimpse_game import GlimpseGameModelWrapper, GlimpseGameEnv, GlimpseGameDataCollector
-from architectures.utils import MetricMixin, rev_normalize
+from architectures.utils import MetricMixin, RevNormalizer
 from datasets.base import BaseDataModule
 
 
@@ -22,11 +22,15 @@ class MaeWrapper(GlimpseGameModelWrapper):
         super().__init__()
         self.mae = mae
         self.extractor = ElasticAttentionMapEntropy(self)
+        self.rev_normalizer = None
 
     def _calculate_loss(self, out, images):
+        if self.rev_normalizer is None:
+            self.rev_normalizer = RevNormalizer(images.device)
+
         pred = self.mae.unpatchify(out)
-        pred = rev_normalize(pred)
-        target = rev_normalize(images)
+        pred = self.rev_normalizer(pred)
+        target = self.rev_normalizer(images)
         return torch.sqrt(
             torch.nn.functional.mse_loss(pred, target, reduce=False)
             .reshape(pred.shape[0], -1)
@@ -50,8 +54,8 @@ class RlMAE(LightningModule, MetricMixin):
     rl_action_dim = 3
 
     def __init__(self, datamodule: BaseDataModule, pretrained_mae_path=None, num_glimpses=12,
-                 rl_iters_per_step=1, batch_size=32, epochs=10, init_random_batches=100, init_backbone_batches=200,
-                 rl_batch_size=256, replay_buffer_size=100000, lr=3e-4) -> None:
+                 rl_iters_per_step=1, batch_size=32, epochs=10, init_random_batches=100, init_backbone_batches=50000,
+                 rl_batch_size=256, replay_buffer_size=10000, lr=3e-4, backbone_lr=1e-5) -> None:
         super().__init__()
 
         self.steps_per_epoch = None
@@ -63,6 +67,7 @@ class RlMAE(LightningModule, MetricMixin):
         self.init_random_batches = init_random_batches
         self.init_backbone_batches = init_backbone_batches
         self.lr = lr
+        self.backbone_lr = backbone_lr
 
         self.datamodule = datamodule
 
@@ -139,7 +144,7 @@ class RlMAE(LightningModule, MetricMixin):
         mae_optimizer = torch.optim.Adam(self.mae.parameters(), self.lr)
         mae_scheduler = torch.optim.lr_scheduler.OneCycleLR(
             optimizer=mae_optimizer,
-            max_lr=self.lr,
+            max_lr=self.backbone_lr,
             pct_start=0.01,
             div_factor=1,
             final_div_factor=1000,
@@ -224,7 +229,18 @@ class RlMAE(LightningModule, MetricMixin):
             device=self.device
         )
 
-    def training_step(self, tensordict_data, batch_idx) -> STEP_OUTPUT:
+    def on_train_start(self) -> None:
+        super().on_train_start()
+        if not hasattr(self.rl_loss_module, '_cache'):
+            self.rl_loss_module._cache = {}
+
+    def training_step(self, tensordict_data, batch_idx):
+        scheduler_actor, scheduler_critic, scheduler_alpha, scheduler_backbone = self.lr_schedulers()
+        scheduler_actor.step()
+        scheduler_critic.step()
+        scheduler_alpha.step()
+        scheduler_backbone.step()
+
         data_view = tensordict_data.reshape(-1)
         self.replay_buffer.extend(data_view.cpu())
 
@@ -232,13 +248,14 @@ class RlMAE(LightningModule, MetricMixin):
 
         self.log(name='train/mae_rmse', value=self.env_train.last_final_rmse, on_step=True, on_epoch=False)
 
-        if self.global_step > self.init_random_batches:
+        if len(self.replay_buffer) > self.init_random_batches * self.batch_size:
             actor_losses = []
             critic_losses = []
             alpha_losses = []
 
             for iter_idx in range(self.rl_iters_per_step):
                 subdata = self.replay_buffer.sample()
+                subdata = subdata.to(tensordict_data.device)
                 loss_td = self.rl_loss_module(subdata)
 
                 actor_loss = loss_td["loss_actor"]
@@ -270,7 +287,7 @@ class RlMAE(LightningModule, MetricMixin):
                      on_epoch=False)
             self.log(name='train/alpha_loss', value=sum(alpha_losses) / len(alpha_losses), on_step=True, on_epoch=False)
 
-        if self.global_step > self.init_backbone_batches:
+        if self.global_step > self.init_backbone_batches * 3:
             final_sampler = self.env_train.pop_prev_sampler()
             if final_sampler is not None:
                 self.mae.train()
@@ -284,10 +301,8 @@ class RlMAE(LightningModule, MetricMixin):
 
                 self.log(name='train/mae_loss', value=mae_loss, on_step=True, on_epoch=False)
 
-        return torch.zeros(size=(0,))
-
-    def validation_step(self, eval_rollout) -> STEP_OUTPUT:
+    def validation_step(self, eval_rollout):
         with set_exploration_type(ExplorationType.MEAN), torch.no_grad():
             mean_mae_loss = eval_rollout['mae_loss'][:, -1].mean().item()
-            self.log(name='val/mae_rmse', value=mean_mae_loss, on_step=True, on_epoch=True)
-            return mean_mae_loss
+            self.log(name='val/mae_loss', value=mean_mae_loss, on_step=True, on_epoch=True)
+            self.log(name='val/mae_rmse', value=self.env_val.last_final_rmse, on_step=True, on_epoch=False)

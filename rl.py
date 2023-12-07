@@ -42,8 +42,6 @@ if __name__ == '__main__':
                       callbacks=callbacks,
                       enable_model_summary=False,
                       num_nodes=1,
-                      devices=1,
-                      benchmark=True,
-                      log_every_n_steps=1)
+                      devices=1)
 
     trainer.fit(model=model)

@@ -82,7 +82,19 @@ def hard_update(source, target):
         target_param.data.copy_(param.data)
 
 
-def rev_normalize(img):
-    return torch.clip(
-        (img * torch.tensor(IMAGENET_MEAN).reshape(1, 3, 1, 1).to(img.device) + torch.tensor(IMAGENET_STD).reshape(1, 3, 1, 1).to(img.device)) * 255,
-        0, 255)
+class RevNormalizer:
+    def __init__(self, device):
+        self.mean = torch.tensor(IMAGENET_MEAN).reshape(1, 3, 1, 1).to(device)
+        self.std = torch.tensor(IMAGENET_STD).reshape(1, 3, 1, 1).to(device)
+
+    def __call__(self, img):
+        return torch.clip((img * self.std + self.mean) * 255, 0, 255)
+
+
+def tensor_wrapper(tensor):
+    """Wrap tensor to prevent it being moved by lightning"""
+
+    def inner_wrapper():
+        return tensor
+
+    return inner_wrapper

@@ -97,7 +97,7 @@ class RandomDelegatedSampler(PatchSampler):
 
 
 class InteractiveSampler:
-    def __init__(self, images: torch.Tensor, native_patch_size=(16, 16), init_grid=True):
+    def __init__(self, images: torch.Tensor, native_patch_size=(16, 16), init_grid=False):
         # B x C x H x W
         assert len(images.shape) == 4 and images.shape[1] == 3
         self._images = images
@@ -109,9 +109,9 @@ class InteractiveSampler:
         self._coords = None
         self.initialize()
 
-    def sample_multi_relative(self, new_crops, grid_size=2):
+    def sample(self, action, grid_size=2):
         # B x (y, x, s)
-        new_crops = new_crops.detach().clone()
+        new_crops = action.detach().clone()
         max_crop_size = (
                 min(self._images.shape[-2], self._images.shape[-1]) / 2)  # half image (we did not train for more)
         min_crop_size = min(self._native_patch_size) * grid_size
@@ -137,9 +137,9 @@ class InteractiveSampler:
                     new_crops[:, y * grid_size + x, 2] = patch_size
 
         new_crops = new_crops.to(torch.long)
-        return self.sample(new_crops)
+        return self._crop_and_resize(new_crops)
 
-    def sample(self, new_crops: torch.Tensor):
+    def _crop_and_resize(self, new_crops: torch.Tensor):
 
         assert new_crops.shape[0] == self._batch_size
         assert new_crops.shape[2] == 3
