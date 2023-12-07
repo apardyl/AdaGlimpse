@@ -16,7 +16,7 @@ if __name__ == '__main__':
     data = ImageNet1k(data_dir='/home/adam/datasets/imagenet', train_batch_size=32, eval_batch_size=32,
                       num_workers=8, always_drop_last=True)
     model = RlMAE(data, pretrained_mae_path='elastic_mae.ckpt', num_glimpses=12, rl_iters_per_step=1, batch_size=32,
-                  epochs=10, init_random_batches=100, rl_batch_size=256,
+                  epochs=10, init_random_batches=100, rl_batch_size=64,
                   replay_buffer_size=10000)
 
     plugins = []

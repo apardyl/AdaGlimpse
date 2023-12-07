@@ -4,7 +4,8 @@ from typing import Optional, Tuple, Iterator
 import torch
 from tensordict import TensorDictBase, TensorDict
 from torchrl.collectors import SyncDataCollector
-from torchrl.data import BoundedTensorSpec, UnboundedContinuousTensorSpec, CompositeSpec, DiscreteTensorSpec
+from torchrl.data import BoundedTensorSpec, UnboundedContinuousTensorSpec, CompositeSpec, DiscreteTensorSpec, \
+    BinaryDiscreteTensorSpec
 from torchrl.envs import EnvBase
 from torchvision.transforms import InterpolationMode
 from torchvision.transforms.v2.functional import resize
@@ -32,6 +33,11 @@ class InteractiveInPlaceSampler:
         )
         self._coords = torch.zeros(
             size=(self._batch_size, self._max_patches, 4),
+            dtype=torch.long,
+            device=self._images.device,
+        )
+        self._mask = torch.ones(
+            size=(self._batch_size, self._max_patches, 1),
             dtype=torch.long,
             device=self._images.device,
         )
@@ -82,6 +88,7 @@ class InteractiveInPlaceSampler:
                 self._patches[b_idx, self._num_patches + p_idx].copy_(patch, non_blocking=True)
                 coords = torch.tensor([y, x, y + s, x + s], dtype=torch.long)
                 self._coords[b_idx, self._num_patches + p_idx].copy_(coords, non_blocking=True)
+                self._mask[b_idx, self._num_patches + p_idx] = 0
 
         self._num_patches += new_crops.shape[1]
 
@@ -92,6 +99,10 @@ class InteractiveInPlaceSampler:
     @property
     def coords(self):
         return self._coords[:, :self._num_patches]
+
+    @property
+    def mask(self):
+        return self._mask
 
     @property
     def images(self):
@@ -121,10 +132,13 @@ class GlimpseGameEnv(EnvBase):
 
         self.state_dim = state_dim
         self.batch_size = torch.Size((batch_size,))
+        patches_per_glimpse = 4
 
         self.observation_spec = CompositeSpec(
-            observation=UnboundedContinuousTensorSpec(shape=torch.Size((batch_size, self.state_dim))),
-            step=DiscreteTensorSpec(n=self.num_glimpses, shape=torch.Size((batch_size, 1))),
+            observation=UnboundedContinuousTensorSpec(
+                shape=torch.Size((batch_size, self.num_glimpses * patches_per_glimpse + 1, self.state_dim))),
+            mask=BinaryDiscreteTensorSpec(n=self.num_glimpses * patches_per_glimpse,
+                                          shape=torch.Size((batch_size, self.num_glimpses * patches_per_glimpse))),
             mae_loss=UnboundedContinuousTensorSpec(shape=torch.Size((batch_size, 1))),
             shape=self.batch_size
         )
@@ -183,6 +197,7 @@ class GlimpseGameEnv(EnvBase):
         return TensorDict({
             'observation': self.current_state,
             'step': torch.ones_like(self.current_error, dtype=torch.long) * self.n_step,
+            'mask': self.sampler.mask,
             'mae_loss': self.current_error,
         }, batch_size=self.images.shape[0], device=self.device)
 
@@ -207,6 +222,7 @@ class GlimpseGameEnv(EnvBase):
         return TensorDict({
             'observation': self.current_state,
             'step': torch.ones_like(self.current_error, dtype=torch.long) * self.n_step,
+            'mask': self.sampler.mask,
             'reward': reward,
             'mae_loss': self.current_error,
             'done': (torch.ones_like if self.is_done else torch.zeros_like)(self.current_error, dtype=torch.bool)

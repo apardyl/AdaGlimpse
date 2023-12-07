@@ -8,21 +8,22 @@ from torchrl.data import ReplayBuffer, LazyTensorStorage
 from torchrl.envs.utils import ExplorationType, set_exploration_type
 from torchrl.objectives import SACLoss, SoftUpdate
 
-from architectures.glimpse_selectors import ElasticAttentionMapEntropy
 from architectures.mae import MaskedAutoencoderViT, mae_vit_base_patch16
-from architectures.rl.actor_critic import ActorCritic
 from architectures.rl.glimpse_game import GlimpseGameModelWrapper, GlimpseGameEnv, GlimpseGameDataCollector
+from architectures.rl.transformer_actor_critic import TransformerActorCritic
 from architectures.utils import MetricMixin, RevNormalizer
 from datasets.base import BaseDataModule
 
 
 class MaeWrapper(GlimpseGameModelWrapper):
 
-    def __init__(self, mae):
+    def __init__(self, mae, num_glimpses, patch_per_glimpse):
         super().__init__()
         self.mae = mae
-        self.extractor = ElasticAttentionMapEntropy(self)
+        # self.extractor = ElasticAttentionMapEntropy(self)
         self.rev_normalizer = None
+        self.num_glimpses = num_glimpses
+        self.patch_per_glimpse = patch_per_glimpse
 
     def _calculate_loss(self, out, images):
         if self.rev_normalizer is None:
@@ -44,12 +45,14 @@ class MaeWrapper(GlimpseGameModelWrapper):
             latent = self.mae.forward_encoder(patches, coords=coords)
             out = self.mae.forward_decoder(latent)
             loss = self._calculate_loss(out, images)
-            state = self.extractor().reshape(images.shape[0], -1)
+            # state = self.extractor().reshape(images.shape[0], -1)
+            state = torch.zeros(images.shape[0], self.num_glimpses * self.patch_per_glimpse + 1, latent.shape[-1])
+            state[:, :latent.shape[1]] = latent
             return state, loss
 
 
 class RlMAE(LightningModule, MetricMixin):
-    rl_state_dim = 196
+    rl_state_dim = 768
     rl_hidden_dim = 256
     rl_action_dim = 3
 
@@ -66,6 +69,7 @@ class RlMAE(LightningModule, MetricMixin):
         self.epochs = epochs
         self.init_random_batches = init_random_batches
         self.init_backbone_batches = init_backbone_batches
+        self.patches_per_glimpse = 4
         self.lr = lr
         self.backbone_lr = backbone_lr
 
@@ -80,12 +84,8 @@ class RlMAE(LightningModule, MetricMixin):
         if pretrained_mae_path:
             self.load_pretrained_elastic(pretrained_mae_path)
 
-        self.actor_critic = ActorCritic(
-            self.rl_state_dim,
-            self.rl_hidden_dim,
-            self.rl_action_dim,
-            self.num_glimpses
-        )
+        self.actor_critic = TransformerActorCritic(action_dim=3, embed_dim=self.rl_state_dim)
+
         self.rl_loss_module = SACLoss(actor_network=self.actor_critic.policy_module,
                                       qvalue_network=self.actor_critic.qvalue_module,
                                       loss_function='smooth_l1',
@@ -210,7 +210,9 @@ class RlMAE(LightningModule, MetricMixin):
         self.datamodule.setup(stage)
 
         self.env_train = GlimpseGameEnv(
-            glimpse_model=MaeWrapper(self.mae),
+            glimpse_model=MaeWrapper(self.mae,
+                                     num_glimpses=self.num_glimpses,
+                                     patch_per_glimpse=self.patches_per_glimpse),
             dataloader=self.datamodule.train_dataloader(),
             num_glimpses=self.num_glimpses,
             batch_size=self.batch_size,
@@ -221,7 +223,9 @@ class RlMAE(LightningModule, MetricMixin):
         self.steps_per_epoch = len(self.env_train)
 
         self.env_val = GlimpseGameEnv(
-            glimpse_model=MaeWrapper(self.mae),
+            glimpse_model=MaeWrapper(self.mae,
+                                     num_glimpses=self.num_glimpses,
+                                     patch_per_glimpse=self.patches_per_glimpse),
             dataloader=self.datamodule.val_dataloader(),
             num_glimpses=self.num_glimpses,
             batch_size=self.batch_size,
