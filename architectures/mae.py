@@ -150,9 +150,11 @@ class MaskedAutoencoderViT(nn.Module):
         N, L, D = x.shape  # batch, length, dim
         # add pos embed w/o cls token
         if coords is None:
-            x = x + self.pos_embed
+            pos_embed = self.pos_embed
         else:
-            x = x + get_2dplus_sincos_pos_embed_coords(self.patch_embed.embed_dim, coords, cls_token=False)
+            pos_embed = get_2dplus_sincos_pos_embed_coords(self.patch_embed.embed_dim, coords, cls_token=False)
+
+        x = x + pos_embed
 
         if patch_indices is not None:
             x = x.gather(1, patch_indices.unsqueeze(2).repeat(1, 1, x.shape[2])).reshape(N, -1, D)
@@ -172,7 +174,7 @@ class MaskedAutoencoderViT(nn.Module):
             x = blk(x, pad_mask)
         x = self.norm(x)
 
-        return x
+        return x, pos_embed
 
     def forward_decoder(self, x, mask=None, patch_indices=None):
         # embed tokens

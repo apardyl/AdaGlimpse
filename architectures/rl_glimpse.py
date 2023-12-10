@@ -17,13 +17,13 @@ from datasets.base import BaseDataModule
 
 class MaeWrapper(GlimpseGameModelWrapper):
 
-    def __init__(self, mae, num_glimpses, patch_per_glimpse):
+    def __init__(self, mae, num_glimpses, patch_per_glimpse, add_pos_embed=True):
         super().__init__()
         self.mae = mae
-        # self.extractor = ElasticAttentionMapEntropy(self)
         self.rev_normalizer = None
         self.num_glimpses = num_glimpses
         self.patch_per_glimpse = patch_per_glimpse
+        self.add_pos_embed = add_pos_embed
 
     def _calculate_loss(self, out, images):
         if self.rev_normalizer is None:
@@ -38,16 +38,19 @@ class MaeWrapper(GlimpseGameModelWrapper):
             .mean(dim=-1, keepdim=True)
         )
 
-    def __call__(self, images, patches, coords
-                 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    def __call__(self, images, patches, coords) -> Tuple[torch.Tensor, torch.Tensor]:
         self.mae.eval()
         with torch.no_grad():
-            latent = self.mae.forward_encoder(patches, coords=coords)
+            latent, pos_embed = self.mae.forward_encoder(patches, coords=coords)
             out = self.mae.forward_decoder(latent)
             loss = self._calculate_loss(out, images)
-            # state = self.extractor().reshape(images.shape[0], -1)
+
+            if self.add_pos_embed:
+                latent[:, 1:] = latent[:, 1:] + pos_embed
+
             state = torch.zeros(images.shape[0], self.num_glimpses * self.patch_per_glimpse + 1, latent.shape[-1])
             state[:, :latent.shape[1]] = latent
+            state = state.detach()
             return state, loss
 
 
@@ -235,6 +238,7 @@ class RlMAE(LightningModule, MetricMixin):
 
     def on_train_start(self) -> None:
         super().on_train_start()
+        # fix for torch rl removing caches on copy to device.
         if not hasattr(self.rl_loss_module, '_cache'):
             self.rl_loss_module._cache = {}
 
@@ -308,5 +312,4 @@ class RlMAE(LightningModule, MetricMixin):
     def validation_step(self, eval_rollout):
         with set_exploration_type(ExplorationType.MEAN), torch.no_grad():
             mean_mae_loss = eval_rollout['mae_loss'][:, -1].mean().item()
-            self.log(name='val/mae_loss', value=mean_mae_loss, on_step=True, on_epoch=True)
-            self.log(name='val/mae_rmse', value=self.env_val.last_final_rmse, on_step=True, on_epoch=False)
+            self.log(name='val/mae_rmse', value=mean_mae_loss, on_step=True, on_epoch=True)

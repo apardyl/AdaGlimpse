@@ -4,8 +4,7 @@ from typing import Optional, Tuple, Iterator
 import torch
 from tensordict import TensorDictBase, TensorDict
 from torchrl.collectors import SyncDataCollector
-from torchrl.data import BoundedTensorSpec, UnboundedContinuousTensorSpec, CompositeSpec, DiscreteTensorSpec, \
-    BinaryDiscreteTensorSpec
+from torchrl.data import BoundedTensorSpec, UnboundedContinuousTensorSpec, CompositeSpec, BinaryDiscreteTensorSpec
 from torchrl.envs import EnvBase
 from torchvision.transforms import InterpolationMode
 from torchvision.transforms.v2.functional import resize
@@ -191,8 +190,11 @@ class GlimpseGameEnv(EnvBase):
 
         self.images = batch['image'].to(self.device)
         self.sampler = self.patch_sampler_class(self.images, glimpse_grid_size=2, max_glimpses=self.num_glimpses)
-        self.current_state, self.current_error = self.glimpse_model(images=self.images, patches=self.sampler.patches,
-                                                                    coords=self.sampler.coords)
+        self.current_state, self.current_error = self.glimpse_model(
+            images=self.images,
+            patches=self.sampler.patches,
+            coords=self.sampler.coords
+        )
 
         return TensorDict({
             'observation': self.current_state,
@@ -207,7 +209,8 @@ class GlimpseGameEnv(EnvBase):
         action = tensordict['action']
         self.sampler.sample(action=action)
 
-        self.current_state, loss = self.glimpse_model(images=self.images, patches=self.sampler.patches,
+        self.current_state, loss = self.glimpse_model(images=self.images,
+                                                      patches=self.sampler.patches,
                                                       coords=self.sampler.coords)
 
         reward = self.current_error - loss
