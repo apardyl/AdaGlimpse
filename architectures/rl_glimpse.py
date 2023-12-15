@@ -76,7 +76,7 @@ class RlMAE(AutoconfigLightningModule, MetricMixin):
         self.val_loader = None
         self.replay_buffer = None
         self.rev_normalizer = RevNormalizer()
-        self.game_state = [None] * min(self.parallel_games, 1)
+        self.game_state = [None] * max(self.parallel_games, 1)
         self.add_pos_embed = True
 
     @classmethod
