@@ -72,23 +72,22 @@ class BaseDataModule(LightningDataModule, abc.ABC):
                             action=argparse.BooleanOptionalAction)
         return parent_parser
 
-    def train_dataloader(self) -> TRAIN_DATALOADERS:
+    def train_dataloader(self, sampler=None) -> TRAIN_DATALOADERS:
         print(f'Loaded {len(self.train_dataset)} train samples', file=sys.stderr)
-        sampler = None
         if self.num_samples is not None:
             sampler = RandomSampler(self.train_dataset, replacement=True, num_samples=self.num_samples)
         return DataLoader(self.train_dataset, batch_size=self.train_batch_size, num_workers=self.num_workers,
                           sampler=sampler, shuffle=None if sampler is not None else True, drop_last=True,
                           pin_memory=True)
 
-    def test_dataloader(self) -> EVAL_DATALOADERS:
+    def test_dataloader(self, sampler=None) -> EVAL_DATALOADERS:
         print(f'Loaded {len(self.test_dataset)} test samples', file=sys.stderr)
-        return DataLoader(self.test_dataset, batch_size=self.eval_batch_size, shuffle=False,
+        return DataLoader(self.test_dataset, batch_size=self.eval_batch_size, sampler=sampler, shuffle=False,
                           num_workers=self.num_workers, pin_memory=True, drop_last=self.always_drop_last)
 
-    def val_dataloader(self) -> EVAL_DATALOADERS:
+    def val_dataloader(self, sampler=None) -> EVAL_DATALOADERS:
         print(f'Loaded {len(self.val_dataset)} val samples', file=sys.stderr)
-        return DataLoader(self.val_dataset, batch_size=self.eval_batch_size, shuffle=False,
+        return DataLoader(self.val_dataset, batch_size=self.eval_batch_size, sampler=sampler, shuffle=False,
                           num_workers=self.num_workers, pin_memory=True, drop_last=self.always_drop_last)
 
     def _load_to_memfs(self):

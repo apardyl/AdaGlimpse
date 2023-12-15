@@ -237,15 +237,19 @@ class RlMAE(AutoconfigLightningModule, MetricMixin):
         self.datamodule.prepare_data()
 
     def setup(self, stage: str) -> None:
-        if stage != 'fit':
+        if stage != 'fit' and stage != 'validate':
             raise NotImplemented()
 
         self.datamodule.setup(stage)
-        self.train_loader = self.datamodule.train_dataloader()
-        self.val_loader = self.datamodule.val_dataloader()
+
         if isinstance(self.trainer.strategy, ParallelStrategy):
-            self.train_loader.sampler = DistributedSampler(self.train_loader.dataset)
-            self.val_loader.sampler = DistributedSampler(self.val_loader.dataset)
+            self.train_loader = self.datamodule.train_dataloader(
+                sampler=DistributedSampler(self.datamodule.train_dataset))
+            self.val_loader = self.datamodule.val_dataloader(
+                sampler=DistributedSampler(self.datamodule.val_dataset))
+        else:
+            self.train_loader = self.datamodule.train_dataloader()
+            self.val_loader = self.datamodule.val_dataloader()
         self.steps_per_epoch = len(self.train_loader) * (self.num_glimpses + 1)
         self.replay_buffer = ReplayBuffer(
             storage=LazyTensorStorage(
