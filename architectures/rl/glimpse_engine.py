@@ -1,6 +1,6 @@
 from abc import abstractmethod, ABC
 from multiprocessing import get_context
-from typing import Tuple, Iterator, List, Dict
+from typing import Tuple, Iterator, List
 
 import torch.utils.data
 from torch import Tensor
@@ -9,7 +9,6 @@ from torch.multiprocessing.queue import Queue
 
 from architectures.rl.interactive_sampler import InteractiveStatelessSampler
 from architectures.rl.shared_memory import SharedMemory
-from datasets import ImageNet1k
 
 
 class BaseGlimpseEngine(ABC):
@@ -57,25 +56,19 @@ class SyncGlimpseEngine(BaseGlimpseEngine):
                 yield state, 0
 
 
+# noinspection PyUnusedLocal
 def glimpse_worker(worker_id, request_queue: Queue, response_queue: Queue, games: List[SharedMemory],
-                   sampler: InteractiveStatelessSampler) -> None:
-    images = None
-
+                   cpu_images: List[Tensor], sampler: InteractiveStatelessSampler) -> None:
     try:
-
         while True:
-            request = request_queue.get()
-            if request is None:
-                return
-            game_idx, new_game = request
+            game_idx = request_queue.get()
+            if game_idx is None:
+                break  # no more requests
 
-            if new_game:
-                images = games[game_idx].images.cpu()
-            else:
-                assert images is not None
-                sampler.sample(images_cpu=images, shared_memory=games[game_idx])
-
+            sampler.sample(images_cpu=cpu_images[game_idx], shared_memory=games[game_idx])
             response_queue.put(game_idx)
+
+        del games
 
     except Exception:
         response_queue.put(None)
@@ -90,40 +83,43 @@ class ParallelGlimpseEngine(BaseGlimpseEngine):
         self.num_parallel_games = num_parallel_games
 
     @staticmethod
-    def _load_next_batch(data_iter, game: SharedMemory) -> bool:
+    def _load_next_batch(data_iter, game: SharedMemory, cpu_image: Tensor) -> bool:
         try:
             batch = next(data_iter)
         except StopIteration:
             return False
         else:
             game.set_batch(batch)
+            cpu_image[:batch['image'].shape[0]].copy_(batch['image'])
             return True
 
     def __iter__(self) -> Iterator[Tuple[SharedMemory, int]]:
         data_iter = iter(self.dataloader)
         games = []
+        cpu_images = []
         for _ in range(self.num_parallel_games):
             games.append(self._build_shared_memory())
+            cpu_images.append(torch.zeros(self.batch_size, 3, *self.image_size, device='cpu').share_memory_())
         for game_idx in range(self.num_parallel_games):
-            if not self._load_next_batch(data_iter, games[game_idx]):
+            if not self._load_next_batch(data_iter, games[game_idx], cpu_images[game_idx]):
                 raise RuntimeError('not enough data to populate glimpse games')
 
         games_playing = self.num_parallel_games
 
         mp = get_context('spawn')
 
-        request_queue = mp.Queue()
-        response_queue = mp.Queue()
+        process_queue = mp.Queue()
+        ready_queue = mp.Queue()
 
-        context = spawn(fn=glimpse_worker, args=(request_queue, response_queue, games, self.sampler),
+        context = spawn(fn=glimpse_worker, args=(process_queue, ready_queue, games, cpu_images, self.sampler),
                         nprocs=self.num_parallel_games,
                         join=False)
 
         for game_idx in range(self.num_parallel_games):
-            request_queue.put((game_idx, True))
+            ready_queue.put(game_idx)
 
         while games_playing > 0:
-            game_idx = response_queue.get()
+            game_idx = ready_queue.get()
             if game_idx is None:
                 context.join(2.)
                 raise RuntimeError('worker error')
@@ -131,31 +127,25 @@ class ParallelGlimpseEngine(BaseGlimpseEngine):
             yield games[game_idx], game_idx
 
             if not games[game_idx].is_done:
-                request_queue.put((game_idx, False))
+                process_queue.put(game_idx)
             else:
-                if self._load_next_batch(data_iter, games[game_idx]):
-                    request_queue.put((game_idx, True))
+                if self._load_next_batch(data_iter, games[game_idx], cpu_images[game_idx]):
+                    ready_queue.put(game_idx)
                 else:
-                    request_queue.put(None)
                     games_playing -= 1
 
-        context.join(timeout=2.)
+        # stop workers
+        for game_idx in range(self.num_parallel_games):
+            process_queue.put(None)
+        context.join(timeout=5)
+        process_queue.close()
+        ready_queue.close()
+        for game_idx in range(self.num_parallel_games):
+            games[game_idx].close()
 
 
-def test():
-    data = ImageNet1k(data_dir='/home/adam/datasets/imagenet', train_batch_size=2, eval_batch_size=2,
-                      num_workers=0, always_drop_last=True)
-    data.setup('validate')
-    dataloader = data.val_dataloader()
-
-    engine = ParallelGlimpseEngine(dataloader=dataloader, max_glimpses=3, glimpse_grid_size=2,
-                                   native_patch_size=(16, 16),
-                                   batch_size=4, device=torch.device('cuda'), image_size=(224, 224),
-                                   num_parallel_games=1)
-
-    for state in engine:
-        print(state)
-
-
-if __name__ == '__main__':
-    test()
+def glimpse_engine(*args, num_parallel_games=0, **kwargs):
+    if num_parallel_games == 0:
+        return SyncGlimpseEngine(*args, **kwargs)
+    else:
+        return ParallelGlimpseEngine(*args, num_parallel_games=num_parallel_games, **kwargs)

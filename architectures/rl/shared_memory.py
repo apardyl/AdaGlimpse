@@ -1,8 +1,14 @@
+from ctypes import Structure, c_int
+from multiprocessing import Value
 from typing import Tuple, Dict
 
 import torch
 from tensordict import TensorDict
 from torch import Tensor
+
+
+class _SharedMemStruct(Structure):
+    _fields_ = [('current_batch_size', c_int), ('current_glimpse', c_int)]
 
 
 class SharedMemory:
@@ -19,19 +25,28 @@ class SharedMemory:
             "coords": torch.zeros((batch_size, self._max_patches, 4)),
             "mask": torch.ones((batch_size, self._max_patches, 1)),
             "action": torch.zeros((batch_size, 3)),
-            "current_batch_size": torch.zeros(1, dtype=torch.long),
-            "current_glimpse": torch.zeros(1, dtype=torch.long)
         }, batch_size=(), device=device)
 
+        self._state = Value(_SharedMemStruct, lock=True)
         self._shared.share_memory_()
+
+    def close(self):
+        del self._shared
+        del self._state
+
+    def _get_state(self) -> Tuple[int, int]:
+        s = self._state.get_obj()
+        return s.current_batch_size, s.current_glimpse
 
     @property
     def patches(self):
-        return self._shared["patches"][:self.current_batch_size, :self.current_glimpse * self._patches_per_glimpse]
+        current_batch_size, current_glimpse = self._get_state()
+        return self._shared["patches"][:current_batch_size, :current_glimpse * self._patches_per_glimpse]
 
     @property
     def coords(self):
-        return self._shared["coords"][:self.current_batch_size, :self.current_glimpse * self._patches_per_glimpse]
+        current_batch_size, current_glimpse = self._get_state()
+        return self._shared["coords"][:current_batch_size, :current_glimpse * self._patches_per_glimpse]
 
     @property
     def images(self):
@@ -47,19 +62,19 @@ class SharedMemory:
 
     @property
     def current_glimpse(self):
-        return int(self._shared['current_glimpse'])
+        return self._state.current_glimpse
 
     @current_glimpse.setter
     def current_glimpse(self, value: int):
-        self._shared["current_glimpse"][:].fill_(value)
+        self._state.current_glimpse = value
 
     @property
     def current_batch_size(self):
-        return int(self._shared['current_batch_size'])
+        return self._state.current_batch_size
 
     @current_batch_size.setter
     def current_batch_size(self, value: int):
-        self._shared['current_batch_size'][:].fill_(value)
+        self._state.current_batch_size = value
 
     @property
     def is_done(self):
@@ -79,15 +94,9 @@ class SharedMemory:
         start = g * self._patches_per_glimpse
         end = start + self._patches_per_glimpse
 
-        try:
-
-            self._shared["patches"][:b, start: end].copy_(new_patches)
-            self._shared["coords"][:b, start: end].copy_(new_coords)
-            self._shared["mask"][:b, start: end].fill_(0)
-
-        except Exception as e:
-            print('xd')
-            raise e
+        self._shared["patches"][:b, start: end].copy_(new_patches)
+        self._shared["coords"][:b, start: end].copy_(new_coords)
+        self._shared["mask"][:b, start: end].fill_(0)
 
         self.current_glimpse = g + 1
 

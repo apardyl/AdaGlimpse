@@ -13,7 +13,7 @@ from torchrl.objectives import SACLoss, SoftUpdate
 
 from architectures.base import AutoconfigLightningModule
 from architectures.mae import MaskedAutoencoderViT, mae_vit_base_patch16
-from architectures.rl.glimpse_engine import SyncGlimpseEngine
+from architectures.rl.glimpse_engine import glimpse_engine
 from architectures.rl.shared_memory import SharedMemory
 from architectures.rl.transformer_actor_critic import TransformerActorCritic
 from architectures.utils import MetricMixin, RevNormalizer
@@ -30,7 +30,7 @@ class RlMAE(AutoconfigLightningModule, MetricMixin):
 
     def __init__(self, datamodule: BaseDataModule, pretrained_mae_path=None, num_glimpses=14,
                  rl_iters_per_step=1, epochs=100, init_random_batches=100, init_backbone_batches=50000,
-                 rl_batch_size=64, replay_buffer_size=10000, lr=3e-4, backbone_lr=1e-5, **_) -> None:
+                 rl_batch_size=64, replay_buffer_size=10000, lr=3e-4, backbone_lr=1e-5, parallel_games=0, **_) -> None:
         super().__init__()
 
         self.steps_per_epoch = None
@@ -48,6 +48,7 @@ class RlMAE(AutoconfigLightningModule, MetricMixin):
         self.backbone_lr = backbone_lr
 
         self.replay_buffer_size = replay_buffer_size
+        self.parallel_games = parallel_games
 
         self.datamodule = datamodule
 
@@ -75,7 +76,7 @@ class RlMAE(AutoconfigLightningModule, MetricMixin):
         self.val_loader = None
         self.replay_buffer = None
         self.rev_normalizer = RevNormalizer()
-        self.game_state = [None]
+        self.game_state = [None] * min(self.parallel_games, 1)
         self.add_pos_embed = True
 
     @classmethod
@@ -121,6 +122,10 @@ class RlMAE(AutoconfigLightningModule, MetricMixin):
                             help='rl replay buffer size in episodes',
                             type=int,
                             default=10000)
+        parser.add_argument('--parallel-games',
+                            help='number of parallel game workers (0 for single-threaded)',
+                            type=int,
+                            default=0)
         return parent_parser
 
     def configure_optimizers(self):
@@ -205,7 +210,7 @@ class RlMAE(AutoconfigLightningModule, MetricMixin):
         print(self.mae.load_state_dict(checkpoint, strict=False), file=sys.stderr)
 
     def train_dataloader(self) -> TRAIN_DATALOADERS:
-        return SyncGlimpseEngine(
+        return glimpse_engine(
             dataloader=self.train_loader,
             max_glimpses=self.num_glimpses,
             glimpse_grid_size=2,
@@ -213,17 +218,19 @@ class RlMAE(AutoconfigLightningModule, MetricMixin):
             batch_size=self.datamodule.train_batch_size,
             device=self.device,
             image_size=self.datamodule.image_size,
+            num_parallel_games=self.parallel_games
         )
 
     def val_dataloader(self) -> EVAL_DATALOADERS:
-        return SyncGlimpseEngine(
+        return glimpse_engine(
             dataloader=self.datamodule.val_dataloader(),
             max_glimpses=self.num_glimpses,
             glimpse_grid_size=2,
             native_patch_size=(16, 16),
             batch_size=self.datamodule.eval_batch_size,
             device=self.device,
-            image_size=self.datamodule.image_size
+            image_size=self.datamodule.image_size,
+            num_parallel_games=self.parallel_games
         )
 
     def prepare_data(self) -> None:
@@ -305,7 +312,8 @@ class RlMAE(AutoconfigLightningModule, MetricMixin):
             action = self.actor_critic.policy_module(state_dict)['action']
             return action
 
-    def random_action(self, batch_size):
+    @staticmethod
+    def random_action(batch_size):
         return BoundedTensorSpec(low=0., high=1., shape=torch.Size((batch_size, 3))).rand()
 
     def training_step(self, batch, batch_idx: int):
