@@ -106,7 +106,7 @@ def main():
                       devices=devices,
                       precision=precision,
                       benchmark=True,
-                      log_every_n_steps=1)
+                      use_distributed_sampler=not model.internal_data)
 
     if not model.internal_data:
         kwargs = {
