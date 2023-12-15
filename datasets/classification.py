@@ -2,11 +2,10 @@ import abc
 import os
 import sys
 from collections import Counter
-from typing import Optional, Tuple, Any, Dict
+from typing import Optional, Any, Dict
 
 import torch
 from PIL import Image
-from lightning.pytorch.utilities.types import TRAIN_DATALOADERS, EVAL_DATALOADERS
 from torch.utils.data import RandomSampler
 from torchvision.datasets import ImageNet
 from torchvision.datasets.imagenet import ARCHIVE_META
@@ -51,18 +50,6 @@ class BaseClassificationDataModule(BaseDataModule, abc.ABC):
         if self.inst_num_classes is not None:
             return self.inst_num_classes
         return self.cls_num_classes
-
-    def train_dataloader(self) -> TRAIN_DATALOADERS:
-        # print(f'Train class statistics:', self.train_dataset.class_stats(), file=sys.stderr)
-        return super().train_dataloader()
-
-    def test_dataloader(self) -> EVAL_DATALOADERS:
-        # print(f'Test class statistics:', self.test_dataset.class_stats(), file=sys.stderr)
-        return super().test_dataloader()
-
-    def val_dataloader(self) -> EVAL_DATALOADERS:
-        # print(f'Val class statistics:', self.val_dataset.class_stats(), file=sys.stderr)
-        return super().val_dataloader()
 
 
 class Sun360Classification(BaseClassificationDataModule):
