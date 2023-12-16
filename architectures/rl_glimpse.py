@@ -74,6 +74,8 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         self.game_state = [None] * max(self.parallel_games, 1)
         self.add_pos_embed = True
 
+        self.save_hyperparameters(ignore=['datamodule'])
+
     @classmethod
     def add_argparse_args(cls, parent_parser):
         parser = parent_parser.add_argument_group(BaseRlMAE.__name__)
@@ -374,7 +376,8 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
 
         optimizer_actor, optimizer_critic, optimizer_alpha, optimizer_backbone = self.optimizers()
 
-        if len(self.replay_buffer) > self.init_random_batches * self.datamodule.train_batch_size:
+        if len(self.replay_buffer) >= min(self.init_random_batches * self.datamodule.train_batch_size,
+                                          self.replay_buffer_size - self.rl_batch_size):
             actor_losses = []
             critic_losses = []
             alpha_losses = []
