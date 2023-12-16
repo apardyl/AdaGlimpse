@@ -80,10 +80,8 @@ def glimpse_worker(worker_id, request_queue: Queue, response_queue: Queue, games
 
 
 class ParallelGlimpseEngine(BaseGlimpseEngine):
-    def __init__(self, dataloader: torch.utils.data.DataLoader, max_glimpses: int, glimpse_grid_size: int,
-                 batch_size: int, image_size: Tuple[int, int], native_patch_size: Tuple[int, int],
-                 device: torch.device, num_parallel_games: int) -> None:
-        super().__init__(dataloader, max_glimpses, glimpse_grid_size, batch_size, image_size, native_patch_size, device)
+    def __init__(self, num_parallel_games: int, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
         self.num_parallel_games = num_parallel_games
 
     @staticmethod
