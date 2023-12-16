@@ -72,7 +72,7 @@ def main():
         ModelCheckpoint(dirpath=f"checkpoints/{run_name}", monitor=model.checkpoint_metric),
         RichProgressBar(leave=True, theme=RichProgressBarTheme(metrics_format='.2e')),
         RichModelSummary(max_depth=3),
-        LearningRateMonitor(logging_interval='epoch')
+        LearningRateMonitor(logging_interval='step')
     ]
 
     if 'SLURM_NTASKS' in os.environ:
@@ -105,7 +105,6 @@ def main():
                       num_nodes=num_nodes,
                       devices=devices,
                       precision=precision,
-                      benchmark=True,
                       use_distributed_sampler=not model.internal_data)
 
     if not model.internal_data:

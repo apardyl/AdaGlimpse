@@ -112,8 +112,7 @@ class ParallelGlimpseEngine(BaseGlimpseEngine):
         ready_queue = mp.Queue()
 
         context = spawn(fn=glimpse_worker, args=(process_queue, ready_queue, games, cpu_images, self.sampler),
-                        nprocs=self.num_parallel_games,
-                        join=False)
+                        nprocs=self.num_parallel_games, join=False, daemon=True)
 
         for game_idx in range(self.num_parallel_games):
             ready_queue.put(game_idx)
