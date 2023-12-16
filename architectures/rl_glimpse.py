@@ -113,11 +113,11 @@ class RlMAE(AutoconfigLightningModule, MetricMixin):
         parser.add_argument('--init-backbone-batches',
                             help='number of rl pre-training steps before starting to train the backbone',
                             type=int,
-                            default=50000)
+                            default=20000)
         parser.add_argument('--rl-batch-size',
                             help='batch size of the rl loop',
                             type=int,
-                            default=64)
+                            default=256)
         parser.add_argument('--replay-buffer-size',
                             help='rl replay buffer size in episodes',
                             type=int,
@@ -289,12 +289,13 @@ class RlMAE(AutoconfigLightningModule, MetricMixin):
                 loss = self._calculate_loss(out, images)
             score = self._calculate_score(out, images)
 
-            if self.add_pos_embed:
-                latent[:, 1:] = latent[:, 1:] + pos_embed
-
             observation = torch.zeros(latent.shape[0], self.num_glimpses * self.patches_per_glimpse + 1,
                                       latent.shape[-1], device=latent.device, dtype=latent.dtype)
-            observation[:, :latent.shape[1]] = latent
+            observation[:, :latent.shape[1]].copy_(latent)
+
+            if self.add_pos_embed:
+                observation[:, 1:latent.shape[1]].add_(pos_embed)
+
             observation.detach_()
 
         done = (torch.ones if step >= self.num_glimpses else torch.zeros)(size=(images.shape[0], 1),
