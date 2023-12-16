@@ -1,6 +1,6 @@
 from abc import abstractmethod, ABC
 from multiprocessing import get_context
-from typing import Tuple, Iterator, List
+from typing import Tuple, Iterator, List, Callable, Dict
 
 import torch.utils.data
 from torch import Tensor
@@ -14,7 +14,8 @@ from architectures.rl.shared_memory import SharedMemory
 class BaseGlimpseEngine(ABC):
     def __init__(self, dataloader: torch.utils.data.DataLoader, max_glimpses: int, glimpse_grid_size: int,
                  batch_size: int, image_size: Tuple[int, int], native_patch_size: Tuple[int, int],
-                 device: torch.device) -> None:
+                 device: torch.device, create_target_tensor_fn: Callable[[int], Tensor],
+                 copy_target_tensor_fn: Callable[[Tensor, Dict[str, Tensor]], None]) -> None:
         self.dataloader = dataloader
         self.max_glimpses = max_glimpses
         self.glimpse_grid_size = glimpse_grid_size
@@ -22,6 +23,8 @@ class BaseGlimpseEngine(ABC):
         self.image_size = image_size
         self.native_patch_size = native_patch_size
         self.device = device
+        self.create_target_tensor_fn = create_target_tensor_fn
+        self.copy_target_tensor_fn = copy_target_tensor_fn
 
         self.sampler = InteractiveStatelessSampler(
             glimpse_grid_size=self.glimpse_grid_size,
@@ -33,7 +36,8 @@ class BaseGlimpseEngine(ABC):
         return SharedMemory(
             max_glimpses=self.max_glimpses, image_size=self.image_size,
             native_patch_size=self.native_patch_size, glimpse_grid_size=self.glimpse_grid_size,
-            batch_size=self.batch_size, device=self.device
+            batch_size=self.batch_size, device=self.device, create_target_tensor_fn=self.create_target_tensor_fn,
+            copy_target_tensor_fn=self.copy_target_tensor_fn
         )
 
     def __len__(self) -> int:

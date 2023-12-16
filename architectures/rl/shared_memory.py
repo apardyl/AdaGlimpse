@@ -1,6 +1,6 @@
 from ctypes import Structure, c_int
 from multiprocessing import Value
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Callable
 
 import torch
 from tensordict import TensorDict
@@ -13,11 +13,14 @@ class _SharedMemStruct(Structure):
 
 class SharedMemory:
     def __init__(self, max_glimpses: int, image_size: Tuple[int, int], native_patch_size: Tuple[int, int],
-                 glimpse_grid_size: int, batch_size: int, device: torch.device):
+                 glimpse_grid_size: int, batch_size: int, device: torch.device,
+                 create_target_tensor_fn: Callable[[int], Tensor],
+                 copy_target_tensor_fn: Callable[[Tensor, Dict[str, Tensor]], None]):
         self._max_glimpses = max_glimpses
         self._glimpse_grid_size = glimpse_grid_size
         self._patches_per_glimpse = glimpse_grid_size ** 2
         self._max_patches = max_glimpses * self._patches_per_glimpse
+        self._copy_target_tensor_fn = copy_target_tensor_fn
 
         self._shared = TensorDict({
             "images": torch.zeros((batch_size, 3, image_size[0], image_size[1])),
@@ -25,6 +28,7 @@ class SharedMemory:
             "coords": torch.zeros((batch_size, self._max_patches, 4)),
             "mask": torch.ones((batch_size, self._max_patches, 1)),
             "action": torch.zeros((batch_size, 3)),
+            "target": create_target_tensor_fn(batch_size)
         }, batch_size=(), device=device)
 
         self._state = Value(_SharedMemStruct, lock=True)
@@ -61,6 +65,10 @@ class SharedMemory:
         return self._shared['action'][:self.current_batch_size]
 
     @property
+    def target(self):
+        return self._shared['target'][:self.current_batch_size]
+
+    @property
     def current_glimpse(self):
         return self._state.current_glimpse
 
@@ -85,6 +93,7 @@ class SharedMemory:
         self.current_batch_size = b
         self._shared["images"][:b].copy_(batch['image'])
         self.current_glimpse = 0
+        self._copy_target_tensor_fn(self._shared["target"], batch)
 
     def add_glimpse(self, new_patches: Tensor, new_coords: Tensor):
         b, g = self.current_batch_size, self.current_glimpse
@@ -101,5 +110,4 @@ class SharedMemory:
         self.current_glimpse = g + 1
 
     def set_action(self, action: Tensor):
-        # noinspection PyTypeChecker
-        self._shared["action"].copy_(action)
+        self._shared["action"][:self.current_batch_size].copy_(action)

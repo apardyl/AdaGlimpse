@@ -1,5 +1,5 @@
 import math
-from typing import Dict, Callable, Collection
+from typing import Dict, Callable, Optional
 
 import torch
 import torch.nn as nn
@@ -52,34 +52,14 @@ class MetricMixin:
         return getattr(self, f'{mode}_{name}')
 
     def log_metric(self, mode: str, name: str, *args, on_step: bool = False, on_epoch: bool = True,
-                   sync_dist: bool = True, prog_bar: bool = False, **kwargs) -> None:
-        self.log(name=f'{mode}/{name}', value=self.get_metric(mode, name)(*args, **kwargs), on_step=on_step,
-                 on_epoch=on_epoch, sync_dist=sync_dist, prog_bar=prog_bar)
-
-
-def soft_update(source, target, tau):
-    """
-    Copies the parameters from source network (x) to target network (y) using the below update
-    y = TAU*x + (1 - TAU)*y
-    :param target: Target network (PyTorch)
-    :param source: Source network (PyTorch)
-    :return:
-    """
-    for target_param, param in zip(target.parameters(), source.parameters()):
-        target_param.data.copy_(
-            target_param.data * (1.0 - tau) + param.data * tau
-        )
-
-
-def hard_update(source, target):
-    """
-    Copies the parameters from source network to target network
-    :param target: Target network (PyTorch)
-    :param source: Source network (PyTorch)
-    :return:
-    """
-    for target_param, param in zip(target.parameters(), source.parameters()):
-        target_param.data.copy_(param.data)
+                   sync_dist: bool = True, prog_bar: bool = False, batch_size: Optional[int] = None,
+                   **kwargs) -> torch.Tensor:
+        metric = self.get_metric(mode, name)
+        value = metric(*args, **kwargs)
+        # noinspection PyUnresolvedReferences
+        self.log(name=f'{mode}/{name}', value=metric, on_step=on_step,
+                 on_epoch=on_epoch, sync_dist=sync_dist, prog_bar=prog_bar, batch_size=batch_size)
+        return value
 
 
 class RevNormalizer:
@@ -92,12 +72,3 @@ class RevNormalizer:
             self.mean = torch.tensor(IMAGENET_MEAN).reshape(1, 3, 1, 1).to(img.device)
             self.std = torch.tensor(IMAGENET_STD).reshape(1, 3, 1, 1).to(img.device)
         return torch.clip((img * self.std + self.mean) * 255, 0, 255)
-
-
-def tensor_wrapper(tensor):
-    """Wrap tensor to prevent it being moved by lightning"""
-
-    def inner_wrapper():
-        return tensor
-
-    return inner_wrapper

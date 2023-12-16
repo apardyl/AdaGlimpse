@@ -1,8 +1,11 @@
 import sys
+from abc import ABC, abstractmethod
 from contextlib import nullcontext
-from typing import Optional
+from functools import partial
+from typing import Optional, Dict
 
 import torch
+import torchmetrics
 from lightning.pytorch.strategies import ParallelStrategy
 from lightning.pytorch.utilities.types import EVAL_DATALOADERS, TRAIN_DATALOADERS
 from tensordict import TensorDict
@@ -18,15 +21,12 @@ from architectures.rl.shared_memory import SharedMemory
 from architectures.rl.transformer_actor_critic import TransformerActorCritic
 from architectures.utils import MetricMixin, RevNormalizer
 from datasets.base import BaseDataModule
+from datasets.classification import BaseClassificationDataModule
 
 
-class RlMAE(AutoconfigLightningModule, MetricMixin):
+class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
     internal_data = True
-    checkpoint_metric = 'val/mae_rmse'
-
-    rl_state_dim = 768
-    rl_hidden_dim = 256
-    rl_action_dim = 3
+    checkpoint_metric = None
 
     def __init__(self, datamodule: BaseDataModule, pretrained_mae_path=None, num_glimpses=14,
                  rl_iters_per_step=1, epochs=100, init_random_batches=100, init_backbone_batches=50000,
@@ -36,14 +36,10 @@ class RlMAE(AutoconfigLightningModule, MetricMixin):
         self.steps_per_epoch = None
         self.num_glimpses = num_glimpses
         self.rl_iters_per_step = rl_iters_per_step
-
-        self.batch_size = max(datamodule.train_batch_size, datamodule.eval_batch_size)
-
         self.rl_batch_size = rl_batch_size
         self.epochs = epochs
         self.init_random_batches = init_random_batches
         self.init_backbone_batches = init_backbone_batches
-        self.patches_per_glimpse = 4
         self.lr = lr
         self.backbone_lr = backbone_lr
 
@@ -61,7 +57,7 @@ class RlMAE(AutoconfigLightningModule, MetricMixin):
         if pretrained_mae_path:
             self.load_pretrained_elastic(pretrained_mae_path)
 
-        self.actor_critic = TransformerActorCritic(action_dim=3, embed_dim=self.rl_state_dim)
+        self.actor_critic = TransformerActorCritic(embed_dim=self.mae.patch_embed.embed_dim)
 
         self.rl_loss_module = SACLoss(actor_network=self.actor_critic.policy_module,
                                       qvalue_network=self.actor_critic.qvalue_module,
@@ -75,13 +71,12 @@ class RlMAE(AutoconfigLightningModule, MetricMixin):
         self.train_loader = None
         self.val_loader = None
         self.replay_buffer = None
-        self.rev_normalizer = RevNormalizer()
         self.game_state = [None] * max(self.parallel_games, 1)
         self.add_pos_embed = True
 
     @classmethod
     def add_argparse_args(cls, parent_parser):
-        parser = parent_parser.add_argument_group(RlMAE.__name__)
+        parser = parent_parser.add_argument_group(BaseRlMAE.__name__)
         parser.add_argument('--lr',
                             help='learning-rate',
                             type=float,
@@ -117,7 +112,7 @@ class RlMAE(AutoconfigLightningModule, MetricMixin):
         parser.add_argument('--rl-batch-size',
                             help='batch size of the rl loop',
                             type=int,
-                            default=256)
+                            default=128)
         parser.add_argument('--replay-buffer-size',
                             help='rl replay buffer size in episodes',
                             type=int,
@@ -205,9 +200,24 @@ class RlMAE(AutoconfigLightningModule, MetricMixin):
         )
 
     def load_pretrained_elastic(self, path=""):
-        checkpoint = torch.load(path, map_location='cpu')["state_dict"]
-        checkpoint = {k[4:]: v for k, v in checkpoint.items() if k.startswith('mae.')}
+        checkpoint = torch.load(path, map_location='cpu')
+        if 'state_dict' in checkpoint:
+            checkpoint = checkpoint["state_dict"]
+            checkpoint = {k[4:]: v for k, v in checkpoint.items() if k.startswith('mae.')}
+        elif 'model' in checkpoint:
+            checkpoint = checkpoint["model"]
+            checkpoint = {'_orig_mod.' + k: v for k, v in checkpoint.items()}
+        else:
+            raise ValueError("Unable to parse pretrained model checkpoint")
         print(self.mae.load_state_dict(checkpoint, strict=False), file=sys.stderr)
+
+    @staticmethod
+    def _copy_target_tensor_fn(target: torch.Tensor, batch: Dict[str, torch.Tensor]):
+        pass
+
+    @staticmethod
+    def _create_target_tensor_fn(batch_size: int):
+        return torch.zeros((batch_size, 0))
 
     def train_dataloader(self) -> TRAIN_DATALOADERS:
         return glimpse_engine(
@@ -218,7 +228,9 @@ class RlMAE(AutoconfigLightningModule, MetricMixin):
             batch_size=self.datamodule.train_batch_size,
             device=self.device,
             image_size=self.datamodule.image_size,
-            num_parallel_games=self.parallel_games
+            num_parallel_games=self.parallel_games,
+            create_target_tensor_fn=self._create_target_tensor_fn,
+            copy_target_tensor_fn=self._copy_target_tensor_fn
         )
 
     def val_dataloader(self) -> EVAL_DATALOADERS:
@@ -230,7 +242,9 @@ class RlMAE(AutoconfigLightningModule, MetricMixin):
             batch_size=self.datamodule.eval_batch_size,
             device=self.device,
             image_size=self.datamodule.image_size,
-            num_parallel_games=self.parallel_games
+            num_parallel_games=self.parallel_games,
+            create_target_tensor_fn=self._create_target_tensor_fn,
+            copy_target_tensor_fn=self._copy_target_tensor_fn
         )
 
     def prepare_data(self) -> None:
@@ -265,31 +279,25 @@ class RlMAE(AutoconfigLightningModule, MetricMixin):
         if not hasattr(self.rl_loss_module, '_cache'):
             self.rl_loss_module._cache = {}
 
-    def _calculate_score(self, out, images):
-        pred = self.mae.unpatchify(out)
-        pred = self.rev_normalizer(pred)
-        target = self.rev_normalizer(images)
-        return -torch.sqrt(
-            torch.nn.functional.mse_loss(pred, target, reduce=False)
-            .reshape(pred.shape[0], -1)
-            .mean(dim=-1, keepdim=True)
-        )
+        if isinstance(self.trainer.strategy, ParallelStrategy):
+            self.train_loader.sampler.set_epoch(self.trainer.current_epoch)
 
-    def _calculate_loss(self, out, images):
-        return self.mae.forward_reconstruction_loss(images, out)
+    @abstractmethod
+    def _forward_task(self, state: SharedMemory, latent: torch.Tensor, is_done: bool, with_loss_and_grad: bool,
+                      mode: str):
+        """This function implements the task-specific forward pass of the model, including computing the loss value,
+        score for RL training, as well as logging any task-specific metrics."""
+        raise NotImplemented()
 
-    def forward_game_state(self, state: SharedMemory, with_loss_and_grad=False):
+    def forward_game_state(self, state: SharedMemory, is_done: bool, mode: str):
+        with_loss_and_grad = mode == 'train' and is_done
         with nullcontext() if with_loss_and_grad else torch.no_grad():
-            images = state.images
             step = state.current_glimpse
             latent, pos_embed = self.mae.forward_encoder(state.patches, coords=state.coords)
-            out = self.mae.forward_decoder(latent)
-            loss = None
-            if with_loss_and_grad:
-                loss = self._calculate_loss(out, images)
-            score = self._calculate_score(out, images)
 
-            observation = torch.zeros(latent.shape[0], self.num_glimpses * self.patches_per_glimpse + 1,
+            loss, score = self._forward_task(state, latent, is_done, with_loss_and_grad, mode)
+
+            observation = torch.zeros(latent.shape[0], state.mask.shape[1] + 1,
                                       latent.shape[-1], device=latent.device, dtype=latent.dtype)
             observation[:, :latent.shape[1]].copy_(latent)
 
@@ -298,12 +306,12 @@ class RlMAE(AutoconfigLightningModule, MetricMixin):
 
             observation.detach_()
 
-        done = (torch.ones if step >= self.num_glimpses else torch.zeros)(size=(images.shape[0], 1),
-                                                                          dtype=torch.bool, device=images.device)
+        done = (torch.ones if step >= self.num_glimpses else torch.zeros)(size=(latent.shape[0], 1),
+                                                                          dtype=torch.bool, device=latent.device)
         state = TensorDict({
             'observation': observation,
             'mask': state.mask,
-            'step': torch.ones(size=(images.shape[0], 1), dtype=torch.long, device=images.device) * step,
+            'step': torch.ones(size=(latent.shape[0], 1), dtype=torch.long, device=latent.device) * step,
             'done': done,
             'terminated': done,
             'score': score,
@@ -333,7 +341,7 @@ class RlMAE(AutoconfigLightningModule, MetricMixin):
         env_state, game_idx = batch
         is_done = env_state.is_done
 
-        next_state, step, backbone_loss = self.forward_game_state(env_state, with_loss_and_grad=is_done)
+        next_state, step, backbone_loss = self.forward_game_state(env_state, is_done, mode='train')
         if not is_done:
             # calculate action and submit it.
             if self.global_step * 3 < self.init_random_batches:
@@ -342,11 +350,6 @@ class RlMAE(AutoconfigLightningModule, MetricMixin):
                 next_action = self.forward_action(next_state, exploration_type=ExplorationType.RANDOM)
             next_state['action'] = next_action
             env_state.set_action(next_action.detach())
-        else:
-            # last step in env - log final score.
-            score = next_state['score'].mean().item()
-            self.log(name='train/mae_rmse', value=-score, on_step=True, on_epoch=True,
-                     batch_size=env_state.current_batch_size)
 
         next_state = next_state.detach()
         if step == 0:
@@ -371,15 +374,15 @@ class RlMAE(AutoconfigLightningModule, MetricMixin):
 
         optimizer_actor, optimizer_critic, optimizer_alpha, optimizer_backbone = self.optimizers()
 
-        if len(self.replay_buffer) > self.init_random_batches * self.batch_size:
+        if len(self.replay_buffer) > self.init_random_batches * self.datamodule.train_batch_size:
             actor_losses = []
             critic_losses = []
             alpha_losses = []
 
             for iter_idx in range(self.rl_iters_per_step):
-                subdata = self.replay_buffer.sample()
-                subdata = subdata.to(self.device)
-                loss_td = self.rl_loss_module(subdata)
+                rl_batch = self.replay_buffer.sample()
+                rl_batch = rl_batch.to(self.device)
+                loss_td = self.rl_loss_module(rl_batch)
 
                 actor_loss = loss_td["loss_actor"]
                 q_loss = loss_td["loss_qvalue"]
@@ -417,7 +420,7 @@ class RlMAE(AutoconfigLightningModule, MetricMixin):
                 optimizer_backbone.zero_grad()
                 self.manual_backward(backbone_loss)
                 optimizer_backbone.step()
-                self.log(name='train/mae_loss', value=backbone_loss.mean().item(), on_step=True, on_epoch=False)
+                self.log(name='train/backbone_loss', value=backbone_loss.mean().item(), on_step=True, on_epoch=False)
 
     def validation_step(self, batch, batch_idx):
         env_state: SharedMemory
@@ -425,12 +428,75 @@ class RlMAE(AutoconfigLightningModule, MetricMixin):
         env_state, game_idx = batch
         is_done = env_state.is_done
 
-        next_state, step, backbone_loss = self.forward_game_state(env_state, with_loss_and_grad=False)
-        score = next_state['score'].mean().item()
+        next_state, step, backbone_loss = self.forward_game_state(env_state, is_done, mode='val')
 
-        if is_done:
-            self.log(name='val/mae_rmse', value=-score, on_step=True, on_epoch=True,
-                     batch_size=env_state.current_batch_size)
-        else:
+        if not is_done:
             next_action = self.forward_action(next_state, exploration_type=ExplorationType.MEAN)
             env_state.set_action(next_action.detach())
+
+
+class ReconstructionRlMAE(BaseRlMAE):
+    checkpoint_metric = 'val/rmse'
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+
+        self.rev_normalizer = RevNormalizer()
+        self.define_metric('rmse', partial(torchmetrics.MeanSquaredError, squared=False))
+
+    def _forward_task(self, state: SharedMemory, latent: torch.Tensor, is_done: bool, with_loss_and_grad: bool,
+                      mode: str):
+        out = self.mae.forward_decoder(latent)
+        loss = None
+        if with_loss_and_grad:
+            loss = self.mae.forward_reconstruction_loss(state.images, out)
+
+        pred = self.mae.unpatchify(out)
+        pred = self.rev_normalizer(pred)
+        target = self.rev_normalizer(state.images)
+        score = -torch.sqrt(
+            torch.nn.functional.mse_loss(pred, target, reduce=False)
+            .reshape(pred.shape[0], -1)
+            .mean(dim=-1, keepdim=True)
+        )
+
+        if is_done:
+            self.log_metric(mode, 'rmse', pred.detach(), target, on_step=True, on_epoch=True,
+                            batch_size=latent.shape[0])
+
+        return loss, score
+
+
+class ClassificationRlMAE(BaseRlMAE):
+    checkpoint_metric = 'val/accuracy'
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+
+        assert isinstance(self.datamodule, BaseClassificationDataModule)
+
+        self.loss_fn = torch.nn.CrossEntropyLoss(reduction='none')
+        self.define_metric('accuracy',
+                           partial(torchmetrics.classification.MulticlassAccuracy,
+                                   num_classes=self.datamodule.cls_num_classes,
+                                   average='micro'))
+
+    @staticmethod
+    def _copy_target_tensor_fn(target: torch.Tensor, batch: Dict[str, torch.Tensor]):
+        target[:batch['label'].shape[0]].copy_(batch['label'])
+
+    @staticmethod
+    def _create_target_tensor_fn(batch_size: int):
+        return torch.zeros(batch_size, dtype=torch.long)
+
+    def _forward_task(self, state: SharedMemory, latent: torch.Tensor, is_done: bool, with_loss_and_grad: bool,
+                      mode: str):
+        out = self.mae.forward_head(latent)
+        target = state.target
+
+        loss = self.loss_fn(out, target)
+        if is_done:
+            self.log_metric(mode, 'accuracy', out.detach(), target, on_step=True, on_epoch=True,
+                            batch_size=latent.shape[0])
+
+        return loss.mean(), -loss.reshape(loss.shape[0], 1)
