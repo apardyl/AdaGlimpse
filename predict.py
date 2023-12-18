@@ -8,7 +8,10 @@ import torchvision.datasets
 from matplotlib import pyplot as plt
 from tqdm import tqdm
 
+from architectures import ElasticMae
 from architectures.base import AutoconfigLightningModule
+from architectures.rl.shared_memory import SharedMemory
+from architectures.rl_glimpse import BaseRlMAE
 from utils.prepare import experiment_from_args
 
 random.seed(1)
@@ -85,6 +88,26 @@ class UserHook:
         self.coords = torch.cat(self.coords, dim=0)
         self.patches = torch.cat(self.patches, dim=0)
         self.selection_mask = torch.cat(self.selection_mask, dim=0)
+
+
+class RLUserHook:
+    def __init__(self):
+        self.images = []
+        self.latent = []
+        self.out = []
+        self.coords = []
+        self.patches = []
+        self.selection_mask = []
+
+    def __call__(self, env_state: SharedMemory, out):
+        if not env_state.is_done:
+            return
+
+        self.images.append(env_state.images.clone().cpu())
+        self.coords.append(env_state.coords.clone().cpu())
+        self.patches.append(env_state.patches.clone().cpu())
+        self.selection_mask.append(None)
+        self.out.append(out)
 
 
 def show_grid(imgs, name=None):
@@ -215,7 +238,11 @@ def main():
     # todo: model loading logic & make to work with RL models.
 
     model.eval()
-    model.user_forward_hook = UserHook()
+
+    if isinstance(model, ElasticMae):
+        model.user_forward_hook = UserHook()
+    elif isinstance(model, BaseRlMAE):
+        model.user_forward_hook = RLUserHook()
 
     data_module.setup('test')
     images_loader = data_module.test_dataloader()

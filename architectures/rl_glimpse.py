@@ -75,6 +75,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         self.add_pos_embed = True
 
         self.save_hyperparameters(ignore=['datamodule'])
+        self._user_forward_hook = None
 
     @classmethod
     def add_argparse_args(cls, parent_parser):
@@ -249,11 +250,25 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
             copy_target_tensor_fn=self._copy_target_tensor_fn
         )
 
+    def test_dataloader(self) -> EVAL_DATALOADERS:
+        return glimpse_engine(
+            dataloader=self.datamodule.test_dataloader(),
+            max_glimpses=self.num_glimpses,
+            glimpse_grid_size=2,
+            native_patch_size=(16, 16),
+            batch_size=self.datamodule.eval_batch_size,
+            device=self.device,
+            image_size=self.datamodule.image_size,
+            num_parallel_games=self.parallel_games,
+            create_target_tensor_fn=self._create_target_tensor_fn,
+            copy_target_tensor_fn=self._copy_target_tensor_fn
+        )
+
     def prepare_data(self) -> None:
         self.datamodule.prepare_data()
 
     def setup(self, stage: str) -> None:
-        if stage != 'fit' and stage != 'validate':
+        if stage != 'fit' and stage != 'validate' and stage != 'test':
             raise NotImplemented()
 
         self.datamodule.setup(stage)
@@ -297,7 +312,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
             step = state.current_glimpse
             latent, pos_embed = self.mae.forward_encoder(state.patches, coords=state.coords)
 
-            loss, score = self._forward_task(state, latent, is_done, with_loss_and_grad, mode)
+            out, loss, score = self._forward_task(state, latent, is_done, with_loss_and_grad, mode)
 
             observation = torch.zeros(latent.shape[0], state.mask.shape[1] + 1,
                                       latent.shape[-1], device=latent.device, dtype=latent.dtype)
@@ -310,7 +325,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
 
         done = (torch.ones if step >= self.num_glimpses else torch.zeros)(size=(latent.shape[0], 1),
                                                                           dtype=torch.bool, device=latent.device)
-        state = TensorDict({
+        next_state = TensorDict({
             'observation': observation,
             'mask': state.mask,
             'step': torch.ones(size=(latent.shape[0], 1), dtype=torch.long, device=latent.device) * step,
@@ -319,7 +334,9 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
             'score': score,
         }, batch_size=observation.shape[0])
 
-        return state, step, loss
+        self.call_user_forward_hook(state, out)
+
+        return next_state, step, loss
 
     @torch.no_grad()
     def forward_action(self, state_dict: TensorDict, exploration_type: ExplorationType):
@@ -354,6 +371,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
             env_state.set_action(next_action.detach())
 
         next_state = next_state.detach()
+
         if step == 0:
             # first step, no previous state available. Store state and finish.
             self.game_state[game_idx] = next_state
@@ -425,17 +443,40 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                 optimizer_backbone.step()
                 self.log(name='train/backbone_loss', value=backbone_loss.mean().item(), on_step=True, on_epoch=False)
 
-    def validation_step(self, batch, batch_idx):
+    def inference_step(self, batch, batch_idx, mode):
         env_state: SharedMemory
         game_idx: int
         env_state, game_idx = batch
         is_done = env_state.is_done
 
-        next_state, step, backbone_loss = self.forward_game_state(env_state, is_done, mode='val')
+        next_state, step, backbone_loss = self.forward_game_state(env_state, is_done, mode=mode)
 
         if not is_done:
             next_action = self.forward_action(next_state, exploration_type=ExplorationType.MEAN)
             env_state.set_action(next_action.detach())
+
+    def validation_step(self, batch, batch_idx):
+        self.inference_step(batch, batch_idx, 'val')
+
+    def test_step(self, batch, batch_idx):
+        self.inference_step(batch, batch_idx, 'test')
+
+    @property
+    def user_forward_hook(self):
+        return self._user_forward_hook
+
+    @user_forward_hook.setter
+    def user_forward_hook(self, hook):
+        self._user_forward_hook = hook
+
+    @user_forward_hook.deleter
+    def user_forward_hook(self):
+        self._user_forward_hook = None
+
+    def call_user_forward_hook(self, *args, **kwargs):
+        if self._user_forward_hook:
+            with torch.no_grad():
+                self._user_forward_hook(*args, **kwargs)
 
 
 class ReconstructionRlMAE(BaseRlMAE):
@@ -466,7 +507,7 @@ class ReconstructionRlMAE(BaseRlMAE):
         if is_done:
             self.log_metric(mode, 'rmse', pred.detach(), target, on_epoch=True, batch_size=latent.shape[0])
 
-        return loss, score
+        return out, loss, score
 
 
 class ClassificationRlMAE(BaseRlMAE):
@@ -504,5 +545,4 @@ class ClassificationRlMAE(BaseRlMAE):
         score = score[torch.arange(score.shape[0]), target]
         score = score * 10
 
-        return loss.mean(), score.reshape(score.shape[0], 1)
-
+        return out, loss.mean(), score.reshape(score.shape[0], 1)

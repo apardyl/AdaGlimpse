@@ -51,7 +51,7 @@ class MetricMixin:
     def get_metric(self, mode: str, name: str):
         return getattr(self, f'{mode}_{name}')
 
-    def log_metric(self, mode: str, name: str, *args, on_step: Optional[bool] = False, on_epoch: Optional[bool] = True,
+    def log_metric(self, mode: str, name: str, *args, on_step: Optional[bool] = None, on_epoch: Optional[bool] = None,
                    sync_dist: bool = True, prog_bar: bool = False, batch_size: Optional[int] = None,
                    **kwargs) -> torch.Tensor:
         metric = self.get_metric(mode, name)

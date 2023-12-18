@@ -16,6 +16,7 @@ from datasets.classification import BaseClassificationDataModule
 from datasets.patch_sampler import InteractiveSampler
 from datasets.utils import IMAGENET_MEAN, IMAGENET_STD
 
+
 class ElasticMae(BaseArchitecture, ABC):
     def __init__(self, datamodule: BaseDataModule, out_chans=3, pretrained_path=None, **kwargs):
         super().__init__(datamodule, **kwargs)
