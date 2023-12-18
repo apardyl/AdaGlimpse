@@ -57,9 +57,9 @@ class MetricMixin:
         metric = self.get_metric(mode, name)
         value = metric(*args, **kwargs)
         if on_epoch is None:
-            on_epoch = 'mode' != 'train'
+            on_epoch = mode != 'train'
         if on_step is None:
-            on_step = 'mode' == 'train'
+            on_step = mode == 'train'
         # noinspection PyUnresolvedReferences
         self.log(name=f'{mode}/{name}', value=metric, on_step=on_step,
                  on_epoch=on_epoch, sync_dist=sync_dist, prog_bar=prog_bar, batch_size=batch_size)
