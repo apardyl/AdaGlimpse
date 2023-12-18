@@ -51,11 +51,15 @@ class MetricMixin:
     def get_metric(self, mode: str, name: str):
         return getattr(self, f'{mode}_{name}')
 
-    def log_metric(self, mode: str, name: str, *args, on_step: bool = False, on_epoch: bool = True,
+    def log_metric(self, mode: str, name: str, *args, on_step: Optional[bool] = False, on_epoch: Optional[bool] = True,
                    sync_dist: bool = True, prog_bar: bool = False, batch_size: Optional[int] = None,
                    **kwargs) -> torch.Tensor:
         metric = self.get_metric(mode, name)
         value = metric(*args, **kwargs)
+        if on_epoch is None:
+            on_epoch = 'mode' != 'train'
+        if on_step is None:
+            on_step = 'mode' == 'train'
         # noinspection PyUnresolvedReferences
         self.log(name=f'{mode}/{name}', value=metric, on_step=on_step,
                  on_epoch=on_epoch, sync_dist=sync_dist, prog_bar=prog_bar, batch_size=batch_size)

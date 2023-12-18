@@ -464,8 +464,7 @@ class ReconstructionRlMAE(BaseRlMAE):
         )
 
         if is_done:
-            self.log_metric(mode, 'rmse', pred.detach(), target, on_step=True, on_epoch=True,
-                            batch_size=latent.shape[0])
+            self.log_metric(mode, 'rmse', pred.detach(), target, on_epoch=True, batch_size=latent.shape[0])
 
         return loss, score
 
@@ -499,7 +498,11 @@ class ClassificationRlMAE(BaseRlMAE):
 
         loss = self.loss_fn(out, target)
         if is_done:
-            self.log_metric(mode, 'accuracy', out.detach(), target, on_step=True, on_epoch=True,
-                            batch_size=latent.shape[0])
+            self.log_metric(mode, 'accuracy', out.detach(), target, on_epoch=True, batch_size=latent.shape[0])
 
-        return loss.mean(), -loss.reshape(loss.shape[0], 1)
+        score = torch.nn.functional.softmax(out, dim=-1)
+        score = score[torch.arange(score.shape[0]), target]
+        score = score * 10
+
+        return loss.mean(), score.reshape(score.shape[0], 1)
+
