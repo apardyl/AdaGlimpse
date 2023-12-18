@@ -87,3 +87,8 @@ class RevNormalizer:
             img = img.reshape(orig_shape)
 
         return img
+
+
+def filter_checkpoint(checkpoint, prefix: str):
+    p = len(prefix)
+    return {k[p:]: v for k, v in checkpoint.items() if k.startswith(prefix)}

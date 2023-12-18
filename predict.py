@@ -44,12 +44,12 @@ def define_args(parent_parser):
         type=str,
         default="visualizations",
     )
-    # parser.add_argument(
-    #     "--model-path",
-    #     help='path to a saved model state',
-    #     type=str,
-    #     required=True
-    # )
+    parser.add_argument(
+        "--model-checkpoint",
+        help='path to a saved model state',
+        type=str,
+        required=True
+    )
     return parent_parser
 
 
@@ -60,15 +60,17 @@ class RLUserHook:
         self.out = []
         self.coords = []
         self.patches = []
+        self.current_out = []
 
     def __call__(self, env_state: SharedMemory, out):
-        if not env_state.is_done:
-            return
+        self.current_out.append(out.clone().detach().cpu())
 
-        self.images.append(env_state.images.clone().cpu())
-        self.coords.append(env_state.coords.clone().cpu())
-        self.patches.append(env_state.patches.clone().cpu())
-        self.out.append(out.clone().cpu())
+        if env_state.is_done:
+            self.images.append(env_state.images.clone().detach().cpu())
+            self.coords.append(env_state.coords.clone().detach().cpu())
+            self.patches.append(env_state.patches.clone().detach().cpu())
+            self.out.append(torch.stack(self.current_out, dim=1))
+            self.current_out = []
 
     def compute(self):
         return {
@@ -169,14 +171,16 @@ def selection_map(mask, patch_size):
 
 
 def visualize_one(model: BaseRlMAE, image: Tensor, out: Tensor, coords: Tensor, patches: Tensor,
-                  save_path: str) -> None:
+                  save_path: str, rev_normalizer) -> None:
     num_glimpses = model.num_glimpses
     patches_per_glimpse = coords.shape[0] // num_glimpses
     assert patches_per_glimpse * num_glimpses == coords.shape[0]  # assert if divisible by num_glimpses
-    patch_size = model.mae.patch_embed.patch_size
+
+    out = model.mae.unpatchify(out)
+    out = rev_normalizer(out).to(torch.uint8)
 
     grid: List[List[Optional[Tensor]]] = [
-        [image] + ([None] * 2)
+        [image, None, out[0]]
     ]
 
     coords = [Coords.from_tensor(x) for x in coords]
@@ -190,7 +194,7 @@ def visualize_one(model: BaseRlMAE, image: Tensor, out: Tensor, coords: Tensor, 
         grid.append([
             bbox_map(image, coords[:end_idx], merged_coords[:glimpse_idx + 1]),
             glimpse_map(patches, coords[:end_idx], image.shape),
-            out
+            out[glimpse_idx + 1]
         ])
 
     show_grid(grid, save_path)
@@ -201,15 +205,13 @@ def visualize(visualization_path, model):
 
     rev_normalizer = RevNormalizer()
     images = rev_normalizer(data["images"]).to(torch.uint8)
-    outs = model.mae.unpatchify(data["out"])
-    outs = rev_normalizer(outs).to(torch.uint8)
     patches = rev_normalizer(data["patches"]).to(torch.uint8)
 
     for idx, (img, out, coord, patch) in enumerate(tqdm(
-            zip(images, outs, data["coords"], patches),
+            zip(images, data["out"], data["coords"], patches),
             total=images.shape[0])):
         visualize_one(model, img, out, coord, patch,
-                      os.path.join(visualization_path, f"{idx}.png"))
+                      os.path.join(visualization_path, f"{idx}.png"), rev_normalizer)
 
 
 def main():
@@ -217,6 +219,8 @@ def main():
     data_module, model, args = experiment_from_args(
         sys.argv, add_argparse_args_fn=define_args
     )
+
+    model.load_pretrained(args.model_checkpoint)
 
     visualization_path = args.visualization_path
     os.makedirs(visualization_path, exist_ok=True)

@@ -19,7 +19,7 @@ from architectures.mae import MaskedAutoencoderViT, mae_vit_base_patch16
 from architectures.rl.glimpse_engine import glimpse_engine
 from architectures.rl.shared_memory import SharedMemory
 from architectures.rl.transformer_actor_critic import TransformerActorCritic
-from architectures.utils import MetricMixin, RevNormalizer
+from architectures.utils import MetricMixin, RevNormalizer, filter_checkpoint
 from datasets.base import BaseDataModule
 from datasets.classification import BaseClassificationDataModule
 
@@ -54,10 +54,10 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         # noinspection PyTypeChecker
         self.mae: MaskedAutoencoderViT = torch.compile(self.mae, mode='reduce-overhead')
 
-        if pretrained_mae_path:
-            self.load_pretrained_elastic(pretrained_mae_path)
-
         self.actor_critic = TransformerActorCritic(embed_dim=self.mae.patch_embed.embed_dim)
+
+        if pretrained_mae_path is not None:
+            self.load_pretrained_elastic(pretrained_mae_path)
 
         self.rl_loss_module = SACLoss(actor_network=self.actor_critic.policy_module,
                                       qvalue_network=self.actor_critic.qvalue_module,
@@ -92,7 +92,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         parser.add_argument('--pretrained-mae-path',
                             help='path to pretrained MAE weights',
                             type=str,
-                            default='elastic_mae.ckpt')
+                            default=None)
         parser.add_argument('--epochs',
                             help='number of epochs',
                             type=int,
@@ -214,6 +214,12 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         else:
             raise ValueError("Unable to parse pretrained model checkpoint")
         print(self.mae.load_state_dict(checkpoint, strict=False), file=sys.stderr)
+
+    def load_pretrained(self, path=""):
+        checkpoint = torch.load(path, map_location='cpu')
+        checkpoint = checkpoint["state_dict"]
+        self.mae.load_state_dict(filter_checkpoint(checkpoint, 'mae.'), strict=True)
+        self.actor_critic.load_state_dict(filter_checkpoint(checkpoint, 'actor_critic.'), strict=True)
 
     @staticmethod
     def _copy_target_tensor_fn(target: torch.Tensor, batch: Dict[str, torch.Tensor]):
