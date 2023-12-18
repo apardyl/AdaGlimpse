@@ -70,6 +70,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
 
         self.train_loader = None
         self.val_loader = None
+        self.test_loader = None
         self.replay_buffer = None
         self.game_state = [None] * max(self.parallel_games, 1)
         self.add_pos_embed = True
@@ -273,22 +274,31 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
 
         self.datamodule.setup(stage)
 
-        if isinstance(self.trainer.strategy, ParallelStrategy):
-            self.train_loader = self.datamodule.train_dataloader(
-                sampler=DistributedSampler(self.datamodule.train_dataset))
-            self.val_loader = self.datamodule.val_dataloader(
-                sampler=DistributedSampler(self.datamodule.val_dataset))
-        else:
-            self.train_loader = self.datamodule.train_dataloader()
-            self.val_loader = self.datamodule.val_dataloader()
-        self.steps_per_epoch = len(self.train_loader) * (self.num_glimpses + 1)
-        self.replay_buffer = ReplayBuffer(
-            storage=LazyTensorStorage(
-                max_size=self.replay_buffer_size,
-                device=self.device
-            ),
-            batch_size=self.rl_batch_size
-        )
+        if stage == 'fit':
+            if isinstance(self.trainer.strategy, ParallelStrategy):
+                self.train_loader = self.datamodule.train_dataloader(
+                    sampler=DistributedSampler(self.datamodule.train_dataset))
+            else:
+                self.train_loader = self.datamodule.train_dataloader()
+
+            self.steps_per_epoch = len(self.train_loader) * (self.num_glimpses + 1)
+            self.replay_buffer = ReplayBuffer(
+                storage=LazyTensorStorage(
+                    max_size=self.replay_buffer_size,
+                    device=self.device
+                ),
+                batch_size=self.rl_batch_size
+            )
+
+        if stage == 'fit' or stage == 'validate':
+            if isinstance(self.trainer.strategy, ParallelStrategy):
+                self.val_loader = self.datamodule.val_dataloader(
+                    sampler=DistributedSampler(self.datamodule.val_dataset))
+            else:
+                self.val_loader = self.datamodule.val_dataloader()
+
+        if stage == 'test':
+            self.test_loader = self.datamodule.test_dataloader()
 
     def on_train_start(self) -> None:
         super().on_train_start()

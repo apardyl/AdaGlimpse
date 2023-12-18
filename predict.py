@@ -1,17 +1,22 @@
 import os.path
 import random
 import sys
+from dataclasses import dataclass
+from operator import itemgetter
+from typing import Optional, List
 
-import numpy as np
 import torch
 import torchvision.datasets
+from lightning import Trainer
 from matplotlib import pyplot as plt
+from torch import Tensor
+from torchvision.transforms.v2.functional import resize
 from tqdm import tqdm
 
-from architectures import ElasticMae
 from architectures.base import AutoconfigLightningModule
 from architectures.rl.shared_memory import SharedMemory
 from architectures.rl_glimpse import BaseRlMAE
+from architectures.utils import RevNormalizer
 from utils.prepare import experiment_from_args
 
 random.seed(1)
@@ -37,57 +42,15 @@ def define_args(parent_parser):
         "--visualization-path",
         help="path to save visualizations to",
         type=str,
-        default="predict_outputs",
+        default="visualizations",
     )
-    parser.add_argument(
-        "--model-path",
-        help='path to a saved model state',
-        type=str,
-        required=True
-    )
+    # parser.add_argument(
+    #     "--model-path",
+    #     help='path to a saved model state',
+    #     type=str,
+    #     required=True
+    # )
     return parent_parser
-
-
-class UserHook:
-    def __init__(self):
-        self.images = []
-        self.latent = []
-        self.out = []
-        self.coords = []
-        self.patches = []
-        self.selection_mask = []
-
-    def _stack_last_step(self):
-        self.out[-1] = torch.stack(self.out[-1], dim=1)
-        self.coords[-1] = torch.stack(self.coords[-1], dim=1)
-        self.patches[-1] = torch.stack(self.patches[-1], dim=1)
-        self.selection_mask[-1] = torch.stack(self.selection_mask[-1], dim=1)
-
-    def __call__(self, step, out, next_glimpse, image, selection_mask, patches):
-        if step == 0:
-            self.images.append(image)
-            if len(self.out) > 0:
-                # stack by the step dimension
-                self._stack_last_step()
-            self.out.append([])
-            self.coords.append([])
-            self.patches.append([])
-            self.selection_mask.append([])
-        # obtain number of glimpses done in single step
-        num_of_glimpses = next_glimpse.shape[1]
-        self.out[-1].append(out)
-        self.coords[-1].append(next_glimpse)
-        self.patches[-1].append(patches[:, -num_of_glimpses:, :, :, :])
-        self.selection_mask[-1].append(selection_mask)
-
-    def stack(self):
-        if type(self.out[-1]) is list:
-            self._stack_last_step()
-        self.images = torch.cat(self.images, dim=0)
-        self.out = torch.cat(self.out, dim=0)
-        self.coords = torch.cat(self.coords, dim=0)
-        self.patches = torch.cat(self.patches, dim=0)
-        self.selection_mask = torch.cat(self.selection_mask, dim=0)
 
 
 class RLUserHook:
@@ -97,7 +60,6 @@ class RLUserHook:
         self.out = []
         self.coords = []
         self.patches = []
-        self.selection_mask = []
 
     def __call__(self, env_state: SharedMemory, out):
         if not env_state.is_done:
@@ -106,11 +68,50 @@ class RLUserHook:
         self.images.append(env_state.images.clone().cpu())
         self.coords.append(env_state.coords.clone().cpu())
         self.patches.append(env_state.patches.clone().cpu())
-        self.selection_mask.append(None)
-        self.out.append(out)
+        self.out.append(out.clone().cpu())
+
+    def compute(self):
+        return {
+            "images": torch.cat(self.images, dim=0),
+            "out": torch.cat(self.out, dim=0),
+            "coords": torch.cat(self.coords, dim=0),
+            "patches": torch.cat(self.patches, dim=0)
+        }
 
 
-def show_grid(imgs, name=None):
+@dataclass
+class Coords:
+    y1: int
+    x1: int
+    y2: int
+    x2: int
+
+    @classmethod
+    def from_tensor(cls, x):
+        x = x.squeeze()
+        assert len(x.shape) == 1 and x.shape[0] == 4
+        return cls(int(x[0]), int(x[1]), int(x[2]), int(x[3]))
+
+    def bbox(self):
+        return self.x1, self.y1, self.x2, self.y2
+
+    @classmethod
+    def merge(cls, coords: List['Coords']):
+        return Coords(
+            min(c.y1 for c in coords),
+            min(c.x1 for c in coords),
+            max(c.y2 for c in coords),
+            max(c.x2 for c in coords)
+        )
+
+    def area(self):
+        return (self.x2 - self.x1) * (self.y2 - self.y1)
+
+    def __lt__(self, other):
+        return self.area() < other.area()
+
+
+def show_grid(imgs, name):
     rows = len(imgs[0])
     columns = len(imgs)
     size = round(imgs[0][0].shape[-1] / 100 + 1, 0)
@@ -119,81 +120,44 @@ def show_grid(imgs, name=None):
     )
     for y, row in enumerate(imgs):
         for x, img in enumerate(row):
-            while len(img.shape) > 3:
-                img = img.squeeze(0)
-            if len(img.shape) < 3:
-                img = img.unsqueeze(0)
-            img = img.detach().float()
-            img = torchvision.transforms.functional.to_pil_image(img)
-            axs[x, y].imshow(np.asarray(img), resample=False)
-            axs[x, y].set(xticklabels=[], yticklabels=[], xticks=[], yticks=[])
+            if img is not None:
+                if len(img.shape) == 3:
+                    if img.shape[0] == 3:
+                        img = img.permute((1, 2, 0))
+                axs[x, y].imshow(img, resample=False)
+                axs[x, y].set(xticklabels=[], yticklabels=[], xticks=[], yticks=[])
+            else:
+                axs[x, y].axis('off')
     plt.tight_layout()
-    if name:
-        plt.savefig(name)
-    else:
-        plt.show()
+    plt.savefig(name)
 
 
-def combine_patches(patch_set, glimpse_sets, coords, output_shape):
-    img = torch.zeros(output_shape)
-    for glimpse, patch in zip(glimpse_sets, patch_set):
-        x, y, z = glimpse
-        img[:, x: x + z, y: y + z] = torchvision.transforms.functional.resize(
-            patch,
-            (z, z),
-            interpolation=torchvision.transforms.InterpolationMode.NEAREST
-        )
-    return img[:, coords[0]: coords[2], coords[1]: coords[3]]
-
-
-def glimpse_map(patches, glimpses, output_shape):
-    img = torch.zeros(output_shape)
-    glimpse_coords = [combine_glimpses(glimpse_set) for glimpse_set in glimpses]
-    for _, coords, patch_set, glimpse_set in sorted([
-        # sort by decreasing area of glimpse
-        (-glimps_area(coords), coords, patch_set, glimpse_sets)
-        for patch_set, coords, glimpse_sets in zip(patches, glimpse_coords, glimpses)
-    ]):
-        patch = combine_patches(patch_set, glimpse_set, coords, output_shape)
-        img[:, coords[0]: coords[2], coords[1]: coords[3]] = patch
+def glimpse_map(patches, coords: List[Coords], output_shape):
+    img = torch.zeros(output_shape, dtype=torch.uint8)
+    for coord, patch in sorted([(coord, patch) for patch, coord in zip(patches, coords)], key=itemgetter(0),
+                               reverse=True):
+        coord: Coords
+        patch = resize(
+            patch, [coord.y2 - coord.y1, coord.x2 - coord.x1],
+            interpolation=torchvision.transforms.InterpolationMode.BILINEAR)
+        img[:, coord.y1: coord.y2, coord.x1: coord.x2] = patch
     return img
 
 
-def combine_glimpses(glimpses, flip_xy=False):
-    glimpses = glimpses.squeeze()
-    for glimpse in glimpses.clone():
-        x, y, z = glimpse
-        glimpses = torch.cat((glimpses, torch.Tensor([[x + z, y + z, z]])), dim=0)
-    if flip_xy:
-        out = [
-            glimpses[:, 1].min(),
-            glimpses[:, 0].min(),
-            glimpses[:, 1].max(),
-            glimpses[:, 0].max(),
-        ]
-    else:
-        out = [
-            glimpses[:, 0].min(),
-            glimpses[:, 1].min(),
-            glimpses[:, 0].max(),
-            glimpses[:, 1].max(),
-        ]
-    out = [int(x) for x in out]
-    return out
-
-
-def glimps_area(coords):
-    return (coords[2] - coords[0]) * (coords[3] - coords[1])
-
-
-def bbox_map(img, glimpses):
+def bbox_map(img, coords, merged_coords):
     boxes = torch.tensor(
-        [combine_glimpses(glimpse_set, flip_xy=True) for glimpse_set in glimpses],
+        [c.bbox() for c in coords],
         dtype=torch.float,
     )
-    colors = ["red" for _ in glimpses]
-    img = (img * 255).clone().to(torch.uint8)  # required by draw_bounding_boxes
-    return torchvision.utils.draw_bounding_boxes(img, boxes, colors=colors, width=3) / 255
+    merged_boxes = torch.tensor(
+        [c.bbox() for c in merged_coords],
+        dtype=torch.float,
+    )
+    colors = ["red"] * len(coords)
+    merged_colors = ["red"] * len(merged_coords)
+    img = torchvision.utils.draw_bounding_boxes(img, boxes, colors=colors, width=1)
+    img = torchvision.utils.draw_bounding_boxes(img, merged_boxes, colors=merged_colors, width=3)
+    return img
 
 
 def selection_map(mask, patch_size):
@@ -204,29 +168,48 @@ def selection_map(mask, patch_size):
     return torch.from_numpy(mask).unsqueeze(0)
 
 
-def visualize(args, model):
-    hook = model.user_forward_hook
-    rounds = hook.coords.shape[1]
-    patch_size = [x // y for x, y in zip(args.image_size, model.mae.grid_size)]
-    for idx, (img, outs, coords, patches, selection_masks) in enumerate(
-            zip(hook.images, hook.out, hook.coords, hook.patches, hook.selection_mask)
-    ):
-        zero_img = torch.zeros_like(img)
-        images = [[0 for _ in range(4)] for _ in range(rounds + 1)]
-        # 0th round
-        images[0] = [img, zero_img, zero_img, zero_img]
-        for glimpse_idx, (out, selection_mask) in enumerate(zip(outs, selection_masks)):
-            glimpse_idx += 1
-            coord, patch = [x[:glimpse_idx] for x in [coords, patches]]
-            # 1st row, selection boxes
-            images[glimpse_idx][0] = bbox_map(img, coord)
-            # 2nd row, glimpses
-            images[glimpse_idx][1] = glimpse_map(patch, coord, img.shape)
-            # 3rd row, reconstruction
-            images[glimpse_idx][2] = model.mae.unpatchify(out.unsqueeze(0)).clip(0, 1)
-            # 4th row, selection mask
-            images[glimpse_idx][3] = selection_map(selection_mask, patch_size)
-        show_grid(images, os.path.join(args.visualization_path, f"{idx}.png"))
+def visualize_one(model: BaseRlMAE, image: Tensor, out: Tensor, coords: Tensor, patches: Tensor,
+                  save_path: str) -> None:
+    num_glimpses = model.num_glimpses
+    patches_per_glimpse = coords.shape[0] // num_glimpses
+    assert patches_per_glimpse * num_glimpses == coords.shape[0]  # assert if divisible by num_glimpses
+    patch_size = model.mae.patch_embed.patch_size
+
+    grid: List[List[Optional[Tensor]]] = [
+        [image] + ([None] * 2)
+    ]
+
+    coords = [Coords.from_tensor(x) for x in coords]
+    merged_coords = [Coords.merge(coords[idx * patches_per_glimpse: idx * patches_per_glimpse + patches_per_glimpse])
+                     for idx in range(num_glimpses)]
+
+    for glimpse_idx in range(model.num_glimpses):
+        start_idx = glimpse_idx * patches_per_glimpse
+        end_idx = start_idx + patches_per_glimpse
+
+        grid.append([
+            bbox_map(image, coords[:end_idx], merged_coords[:glimpse_idx + 1]),
+            glimpse_map(patches, coords[:end_idx], image.shape),
+            out
+        ])
+
+    show_grid(grid, save_path)
+
+
+def visualize(visualization_path, model):
+    data = model.user_forward_hook.compute()
+
+    rev_normalizer = RevNormalizer()
+    images = rev_normalizer(data["images"]).to(torch.uint8)
+    outs = model.mae.unpatchify(data["out"])
+    outs = rev_normalizer(outs).to(torch.uint8)
+    patches = rev_normalizer(data["patches"]).to(torch.uint8)
+
+    for idx, (img, out, coord, patch) in enumerate(tqdm(
+            zip(images, outs, data["coords"], patches),
+            total=images.shape[0])):
+        visualize_one(model, img, out, coord, patch,
+                      os.path.join(visualization_path, f"{idx}.png"))
 
 
 def main():
@@ -235,24 +218,20 @@ def main():
         sys.argv, add_argparse_args_fn=define_args
     )
 
-    # todo: model loading logic & make to work with RL models.
+    visualization_path = args.visualization_path
+    os.makedirs(visualization_path, exist_ok=True)
 
     model.eval()
 
-    if isinstance(model, ElasticMae):
-        model.user_forward_hook = UserHook()
-    elif isinstance(model, BaseRlMAE):
+    if isinstance(model, BaseRlMAE):
         model.user_forward_hook = RLUserHook()
+    else:
+        raise RuntimeError(f"Unrecognized model type: {type(model)}")
 
-    data_module.setup('test')
-    images_loader = data_module.test_dataloader()
+    trainer = Trainer()
+    trainer.test(model)
 
-    for idx, (image, cls) in enumerate(tqdm(images_loader, total=min(len(images_loader), args.max_batches))):
-        if idx >= args.max_batches:
-            break
-        _ = model(image)
-    model.user_forward_hook.stack()
-    visualize(args, model)
+    visualize(visualization_path, model)
 
 
 if __name__ == "__main__":

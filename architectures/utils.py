@@ -75,4 +75,15 @@ class RevNormalizer:
         if self.mean is None:
             self.mean = torch.tensor(IMAGENET_MEAN).reshape(1, 3, 1, 1).to(img.device)
             self.std = torch.tensor(IMAGENET_STD).reshape(1, 3, 1, 1).to(img.device)
-        return torch.clip((img * self.std + self.mean) * 255, 0, 255)
+
+        orig_shape = None
+        if len(img.shape) > 4:
+            orig_shape = img.shape
+            img = img.reshape(-1, *orig_shape[-3:])
+
+        img = torch.clip((img * self.std + self.mean) * 255, 0, 255)
+
+        if orig_shape is not None:
+            img = img.reshape(orig_shape)
+
+        return img
