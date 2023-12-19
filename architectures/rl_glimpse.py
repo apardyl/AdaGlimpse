@@ -172,9 +172,9 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
             epochs=self.epochs,
             steps_per_epoch=self.steps_per_epoch
         )
-        mae_optimizer = torch.optim.Adam(self.mae.parameters(), self.lr)
-        mae_scheduler = torch.optim.lr_scheduler.OneCycleLR(
-            optimizer=mae_optimizer,
+        backbone_optimizer = torch.optim.Adam(self.mae.parameters(), self.lr)
+        backbone_scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            optimizer=backbone_optimizer,
             max_lr=self.backbone_lr,
             pct_start=0.01,
             div_factor=1,
@@ -188,28 +188,32 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                 "optimizer": actor_optimizer,
                 "lr_scheduler": {
                     'scheduler': actor_scheduler,
-                    'interval': 'step'
+                    'interval': 'step',
+                    'name': 'lr/actor'
                 }
             },
             {
                 "optimizer": critic_optimizer,
                 "lr_scheduler": {
                     'scheduler': critic_scheduler,
-                    'interval': 'step'
+                    'interval': 'step',
+                    'name': 'lr/critic'
                 }
             },
             {
                 "optimizer": alpha_optimizer,
                 "lr_scheduler": {
                     'scheduler': alpha_scheduler,
-                    'interval': 'step'
+                    'interval': 'step',
+                    'name': 'lr/alpha'
                 }
             },
             {
-                "optimizer": mae_optimizer,
+                "optimizer": backbone_optimizer,
                 "lr_scheduler": {
-                    'scheduler': mae_scheduler,
-                    'interval': 'step'
+                    'scheduler': backbone_scheduler,
+                    'interval': 'step',
+                    'name': 'lr/backbone'
                 }
             }
         )
