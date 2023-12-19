@@ -58,12 +58,15 @@ class RLUserHook:
         self.images = []
         self.latent = []
         self.out = []
+        self.scores = []
         self.coords = []
         self.patches = []
         self.current_out = []
+        self.current_scores = []
 
-    def __call__(self, env_state: SharedMemory, out):
+    def __call__(self, env_state: SharedMemory, out, score):
         self.current_out.append(out.clone().detach().cpu())
+        self.current_scores.append(score.clone().detach().cpu())
 
         if env_state.is_done:
             self.images.append(env_state.images.clone().detach().cpu())
@@ -71,11 +74,14 @@ class RLUserHook:
             self.patches.append(env_state.patches.clone().detach().cpu())
             self.out.append(torch.stack(self.current_out, dim=1))
             self.current_out = []
+            self.scores.append(torch.stack(self.current_scores, dim=1))
+            self.current_scores = []
 
     def compute(self):
         return {
             "images": torch.cat(self.images, dim=0),
             "out": torch.cat(self.out, dim=0),
+            "scores": torch.cat(self.scores, dim=0),
             "coords": torch.cat(self.coords, dim=0),
             "patches": torch.cat(self.patches, dim=0)
         }
@@ -113,23 +119,29 @@ class Coords:
         return self.area() < other.area()
 
 
-def show_grid(imgs, name):
-    rows = len(imgs[0])
-    columns = len(imgs)
-    size = round(imgs[0][0].shape[-1] / 100 + 1, 0)
+def show_grid(grid, name):
+    rows = len(grid[0])
+    columns = len(grid)
+    size = round(grid[0][0].shape[-1] / 100 + 1, 0)
     fig, axs = plt.subplots(
-        figsize=(columns * size, rows * size), ncols=columns, nrows=rows, squeeze=False
+        figsize=(columns * size, rows * size), ncols=columns, nrows=rows, squeeze=False,
+        height_ratios=([5] * (rows - 1) + [1])
     )
-    for y, row in enumerate(imgs):
-        for x, img in enumerate(row):
-            if img is not None:
-                if len(img.shape) == 3:
-                    if img.shape[0] == 3:
-                        img = img.permute((1, 2, 0))
-                axs[x, y].imshow(img, resample=False)
-                axs[x, y].set(xticklabels=[], yticklabels=[], xticks=[], yticks=[])
+    for y, row in enumerate(grid):
+        for x, field in enumerate(row):
+            if field is not None:
+                if len(field.shape) == 1 and field.shape[0] == 1:
+                    axs[x, y].set_axis_off()
+                    axs[x, y].text(0.15, 0.4, f'Score: {float(field):.3f}',
+                                   font={'size': 18})
+                else:
+                    if len(field.shape) == 3:
+                        if field.shape[0] == 3:
+                            field = field.permute((1, 2, 0))
+                    axs[x, y].imshow(field, resample=False)
+                    axs[x, y].set(xticklabels=[], yticklabels=[], xticks=[], yticks=[])
             else:
-                axs[x, y].axis('off')
+                axs[x, y].set_axis_off()
     plt.tight_layout()
     plt.savefig(name)
 
@@ -170,7 +182,7 @@ def selection_map(mask, patch_size):
     return torch.from_numpy(mask).unsqueeze(0)
 
 
-def visualize_one(model: BaseRlMAE, image: Tensor, out: Tensor, coords: Tensor, patches: Tensor,
+def visualize_one(model: BaseRlMAE, image: Tensor, out: Tensor, coords: Tensor, patches: Tensor, scores: Tensor,
                   save_path: str, rev_normalizer) -> None:
     num_glimpses = model.num_glimpses
     patches_per_glimpse = coords.shape[0] // num_glimpses
@@ -180,7 +192,7 @@ def visualize_one(model: BaseRlMAE, image: Tensor, out: Tensor, coords: Tensor, 
     out = rev_normalizer(out).to(torch.uint8)
 
     grid: List[List[Optional[Tensor]]] = [
-        [image, None, out[0]]
+        [image, None, out[0], scores[0]]
     ]
 
     coords = [Coords.from_tensor(x) for x in coords]
@@ -194,7 +206,8 @@ def visualize_one(model: BaseRlMAE, image: Tensor, out: Tensor, coords: Tensor, 
         grid.append([
             bbox_map(image, coords[:end_idx], merged_coords[:glimpse_idx + 1]),
             glimpse_map(patches, coords[:end_idx], image.shape),
-            out[glimpse_idx + 1]
+            out[glimpse_idx + 1],
+            scores[glimpse_idx + 1]
         ])
 
     show_grid(grid, save_path)
@@ -207,10 +220,10 @@ def visualize(visualization_path, model):
     images = rev_normalizer(data["images"]).to(torch.uint8)
     patches = rev_normalizer(data["patches"]).to(torch.uint8)
 
-    for idx, (img, out, coord, patch) in enumerate(tqdm(
-            zip(images, data["out"], data["coords"], patches),
+    for idx, (img, out, coord, patch, score) in enumerate(tqdm(
+            zip(images, data["out"], data["coords"], patches, data['scores']),
             total=images.shape[0])):
-        visualize_one(model, img, out, coord, patch,
+        visualize_one(model, img, out, coord, patch, score,
                       os.path.join(visualization_path, f"{idx}.png"), rev_normalizer)
 
 

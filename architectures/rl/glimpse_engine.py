@@ -14,7 +14,7 @@ from architectures.rl.shared_memory import SharedMemory
 class BaseGlimpseEngine(ABC):
     def __init__(self, dataloader: torch.utils.data.DataLoader, max_glimpses: int, glimpse_grid_size: int,
                  batch_size: int, image_size: Tuple[int, int], native_patch_size: Tuple[int, int],
-                 device: torch.device, create_target_tensor_fn: Callable[[int], Tensor],
+                 max_glimpse_size_ratio: float, device: torch.device, create_target_tensor_fn: Callable[[int], Tensor],
                  copy_target_tensor_fn: Callable[[Tensor, Dict[str, Tensor]], None]) -> None:
         self.dataloader = dataloader
         self.max_glimpses = max_glimpses
@@ -29,7 +29,8 @@ class BaseGlimpseEngine(ABC):
         self.sampler = InteractiveStatelessSampler(
             glimpse_grid_size=self.glimpse_grid_size,
             max_glimpses=self.max_glimpses,
-            native_patch_size=self.native_patch_size
+            native_patch_size=self.native_patch_size,
+            max_size_ratio=max_glimpse_size_ratio
         )
 
     def _build_shared_memory(self):

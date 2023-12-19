@@ -10,7 +10,7 @@ from architectures.rl.shared_memory import SharedMemory
 
 class InteractiveStatelessSampler:
     def __init__(self, glimpse_grid_size: int, max_glimpses: int, native_patch_size: Tuple[int, int],
-                 max_size_ratio=0.5):
+                 max_size_ratio=1):
         self._native_patch_size = native_patch_size
         self._glimpse_grid_size = glimpse_grid_size
         self._patches_per_glimpse = glimpse_grid_size ** 2

@@ -29,12 +29,15 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
     checkpoint_metric = None
 
     def __init__(self, datamodule: BaseDataModule, pretrained_mae_path=None, num_glimpses=14,
-                 rl_iters_per_step=1, epochs=100, init_random_batches=100, init_backbone_batches=50000,
-                 rl_batch_size=64, replay_buffer_size=10000, lr=3e-4, backbone_lr=1e-5, parallel_games=0, **_) -> None:
+                 max_glimpse_size_ratio=1.0, glimpse_grid_size=2, rl_iters_per_step=1, epochs=100,
+                 init_random_batches=100, init_backbone_batches=50000, rl_batch_size=64, replay_buffer_size=10000,
+                 lr=3e-4, backbone_lr=1e-5, parallel_games=0, **_) -> None:
         super().__init__()
 
         self.steps_per_epoch = None
         self.num_glimpses = num_glimpses
+        self.max_glimpse_size_ratio = max_glimpse_size_ratio
+        self.glimpse_grid_size = glimpse_grid_size
         self.rl_iters_per_step = rl_iters_per_step
         self.rl_batch_size = rl_batch_size
         self.epochs = epochs
@@ -125,6 +128,14 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                             help='number of parallel game workers (0 for single-threaded)',
                             type=int,
                             default=0)
+        parser.add_argument('--max-glimpse-size-ratio',
+                            help='maximum glimpse size relative to full image size',
+                            type=float,
+                            default=1.0)
+        parser.add_argument('--glimpse-grid-size',
+                            help='size of glimpse sampling grid in patches along grid side',
+                            type=int,
+                            default=2)
         return parent_parser
 
     def configure_optimizers(self):
@@ -233,9 +244,10 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         return glimpse_engine(
             dataloader=self.train_loader,
             max_glimpses=self.num_glimpses,
-            glimpse_grid_size=2,
+            glimpse_grid_size=self.glimpse_grid_size,
             native_patch_size=(16, 16),
             batch_size=self.datamodule.train_batch_size,
+            max_glimpse_size_ratio=self.max_glimpse_size_ratio,
             device=self.device,
             image_size=self.datamodule.image_size,
             num_parallel_games=self.parallel_games,
@@ -247,9 +259,10 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         return glimpse_engine(
             dataloader=self.datamodule.val_dataloader(),
             max_glimpses=self.num_glimpses,
-            glimpse_grid_size=2,
+            glimpse_grid_size=self.glimpse_grid_size,
             native_patch_size=(16, 16),
             batch_size=self.datamodule.eval_batch_size,
+            max_glimpse_size_ratio=self.max_glimpse_size_ratio,
             device=self.device,
             image_size=self.datamodule.image_size,
             num_parallel_games=self.parallel_games,
@@ -261,9 +274,10 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         return glimpse_engine(
             dataloader=self.datamodule.test_dataloader(),
             max_glimpses=self.num_glimpses,
-            glimpse_grid_size=2,
+            glimpse_grid_size=self.glimpse_grid_size,
             native_patch_size=(16, 16),
             batch_size=self.datamodule.eval_batch_size,
+            max_glimpse_size_ratio=self.max_glimpse_size_ratio,
             device=self.device,
             image_size=self.datamodule.image_size,
             num_parallel_games=self.parallel_games,
@@ -350,7 +364,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
             'score': score,
         }, batch_size=observation.shape[0])
 
-        self.call_user_forward_hook(state, out)
+        self.call_user_forward_hook(state, out, score)
 
         return next_state, step, loss
 
