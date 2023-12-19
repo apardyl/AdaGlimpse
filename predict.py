@@ -153,7 +153,7 @@ def glimpse_map(patches, coords: List[Coords], output_shape):
         coord: Coords
         patch = resize(
             patch, [coord.y2 - coord.y1, coord.x2 - coord.x1],
-            interpolation=torchvision.transforms.InterpolationMode.BILINEAR)
+            interpolation=torchvision.transforms.InterpolationMode.NEAREST)
         img[:, coord.y1: coord.y2, coord.x1: coord.x2] = patch
     return img
 
