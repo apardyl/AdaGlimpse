@@ -27,18 +27,6 @@ torch.set_float32_matmul_precision("high")
 def define_args(parent_parser):
     parser = parent_parser.add_argument_group("predict.py")
     parser.add_argument(
-        "--max-batches",
-        help="number of batches from dataset to process",
-        type=int,
-        default=16,
-    )
-    parser.add_argument(
-        "--batch-size", '--bs',
-        help="size of batches",
-        type=int,
-        default=1,
-    )
-    parser.add_argument(
         "--visualization-path",
         help="path to save visualizations to",
         type=str,
@@ -167,8 +155,8 @@ def bbox_map(img, coords, merged_coords):
         [c.bbox() for c in merged_coords],
         dtype=torch.float,
     )
-    colors = ["red"] * len(coords)
-    merged_colors = ["red"] * len(merged_coords)
+    colors = ["black"] * (len(coords) - 1) + ["red"]
+    merged_colors = ["black"] * (len(merged_coords) - 1) + ["red"]
     img = torchvision.utils.draw_bounding_boxes(img, boxes, colors=colors, width=1)
     img = torchvision.utils.draw_bounding_boxes(img, merged_boxes, colors=merged_colors, width=3)
     return img

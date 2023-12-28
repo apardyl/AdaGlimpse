@@ -15,7 +15,7 @@ from torchrl.envs.utils import ExplorationType, set_exploration_type
 from torchrl.objectives import SACLoss, SoftUpdate
 
 from architectures.base import AutoconfigLightningModule
-from architectures.mae import MaskedAutoencoderViT, mae_vit_base_patch16
+from architectures.mae import MaskedAutoencoderViT, mae_vit_base_patch16, mae_vit_small_patch16, mae_vit_large_patch16
 from architectures.rl.glimpse_engine import glimpse_engine
 from architectures.rl.shared_memory import SharedMemory
 from architectures.rl.transformer_actor_critic import TransformerActorCritic
@@ -28,10 +28,10 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
     internal_data = True
     checkpoint_metric = None
 
-    def __init__(self, datamodule: BaseDataModule, pretrained_mae_path=None, num_glimpses=14,
+    def __init__(self, datamodule: BaseDataModule, backbone_size='base', pretrained_mae_path=None, num_glimpses=14,
                  max_glimpse_size_ratio=1.0, glimpse_grid_size=2, rl_iters_per_step=1, epochs=100,
                  init_random_batches=100, init_backbone_batches=50000, rl_batch_size=64, replay_buffer_size=10000,
-                 lr=3e-4, backbone_lr=1e-5, parallel_games=0, **_) -> None:
+                 lr=3e-4, backbone_lr=1e-5, parallel_games=0, backbone_training_type: str = 'constant', **_) -> None:
         super().__init__()
 
         self.steps_per_epoch = None
@@ -45,6 +45,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         self.init_backbone_batches = init_backbone_batches
         self.lr = lr
         self.backbone_lr = backbone_lr
+        self.backbone_training_type = backbone_training_type
 
         self.replay_buffer_size = replay_buffer_size
         self.parallel_games = parallel_games
@@ -53,7 +54,11 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
 
         self.automatic_optimization = False  # disable lightning automation
 
-        self.mae = mae_vit_base_patch16(img_size=datamodule.image_size, out_chans=3)
+        self.mae = {
+            'small': mae_vit_small_patch16,
+            'base': mae_vit_base_patch16,
+            'large': mae_vit_large_patch16
+        }[backbone_size](img_size=datamodule.image_size, out_chans=3)
         # noinspection PyTypeChecker
         self.mae: MaskedAutoencoderViT = torch.compile(self.mae, mode='reduce-overhead')
 
@@ -88,6 +93,10 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                             help='learning-rate',
                             type=float,
                             default=3e-4)
+        parser.add_argument('--backbone-size',
+                            help='backbone ViT size',
+                            type=str,
+                            default='base')
         parser.add_argument('--backbone-lr',
                             help='backbone learning-rate',
                             type=float,
@@ -116,6 +125,11 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                             help='number of rl pre-training steps before starting to train the backbone',
                             type=int,
                             default=20000)
+        parser.add_argument('--backbone-training-type',
+                            help='type of backbone training regime',
+                            choices=['disabled', 'constant', 'alternating'],
+                            default='constant',
+                            type=str)
         parser.add_argument('--rl-batch-size',
                             help='batch size of the rl loop',
                             type=int,
@@ -382,6 +396,64 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
     def random_action(batch_size):
         return BoundedTensorSpec(low=0., high=1., shape=torch.Size((batch_size, 3))).rand()
 
+    @property
+    def is_rl_training_enabled(self):
+        if self.backbone_training_type == 'alternating':
+            return self.current_epoch % 2 == 0
+        return True
+
+    @property
+    def is_backbone_training_enabled(self):
+        if self.backbone_training_type == 'disabled':
+            return False
+        elif self.backbone_training_type == 'constant':
+            return True
+        elif self.backbone_training_type == 'alternating':
+            return self.current_epoch % 2 == 1
+        else:
+            raise ValueError('Unknown backbone training mode')
+
+    def rl_training_step(self, optimizer_actor, optimizer_critic, optimizer_alpha, batch_size):
+        actor_losses = []
+        critic_losses = []
+        alpha_losses = []
+
+        for iter_idx in range(self.rl_iters_per_step):
+            rl_batch = self.replay_buffer.sample()
+            rl_batch = rl_batch.to(self.device)
+            loss_td = self.rl_loss_module(rl_batch)
+
+            actor_loss = loss_td["loss_actor"]
+            q_loss = loss_td["loss_qvalue"]
+            alpha_loss = loss_td["loss_alpha"]
+
+            # Update actor
+            optimizer_actor.zero_grad()
+            self.manual_backward(actor_loss)
+            optimizer_actor.step()
+            actor_losses.append(actor_loss.mean().item())
+
+            # Update critic
+            optimizer_critic.zero_grad()
+            self.manual_backward(q_loss)
+            optimizer_critic.step()
+            critic_losses.append(q_loss.mean().item())
+
+            # Update alpha
+            optimizer_alpha.zero_grad()
+            self.manual_backward(alpha_loss)
+            optimizer_alpha.step()
+            alpha_losses.append(alpha_loss.mean().item())
+
+            self.target_net_updater.step()
+
+        self.log(name='train/actor_loss', value=sum(actor_losses) / len(actor_losses), on_step=True, on_epoch=False,
+                 batch_size=batch_size)
+        self.log(name='train/critic_loss', value=sum(critic_losses) / len(critic_losses), on_step=True,
+                 on_epoch=False, batch_size=batch_size)
+        self.log(name='train/alpha_loss', value=sum(alpha_losses) / len(alpha_losses), on_step=True, on_epoch=False,
+                 batch_size=batch_size)
+
     def training_step(self, batch, batch_idx: int):
         scheduler_actor, scheduler_critic, scheduler_alpha, scheduler_backbone = self.lr_schedulers()
         scheduler_actor.step()
@@ -404,73 +476,37 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
             next_state['action'] = next_action
             env_state.set_action(next_action.detach())
 
-        next_state = next_state.detach()
+        if self.is_rl_training_enabled:
+            next_state = next_state.detach()
 
-        if step == 0:
-            # first step, no previous state available. Store state and finish.
-            self.game_state[game_idx] = next_state
-            return
+            if step == 0:
+                # first step, no previous state available. Store state and finish.
+                self.game_state[game_idx] = next_state
+                return
 
-        # previous state available.
-        state: Optional[TensorDict] = self.game_state[game_idx]
-        assert state is not None
+            # previous state available.
+            state: Optional[TensorDict] = self.game_state[game_idx]
+            assert state is not None
 
-        state['next'] = next_state
-        if not is_done:
-            self.game_state[game_idx] = next_state
-        else:
-            self.game_state[game_idx] = None
+            state['next'] = next_state
+            if not is_done:
+                self.game_state[game_idx] = next_state
+            else:
+                self.game_state[game_idx] = None
 
-        # calculate reward.
-        state['next', 'reward'] = state['next', 'score'] - state['score']
+            # calculate reward.
+            state['next', 'reward'] = state['next', 'score'] - state['score']
 
-        self.replay_buffer.extend(state)
+            self.replay_buffer.extend(state)
 
         optimizer_actor, optimizer_critic, optimizer_alpha, optimizer_backbone = self.optimizers()
 
-        if len(self.replay_buffer) >= min(self.init_random_batches * self.datamodule.train_batch_size,
-                                          self.replay_buffer_size - self.rl_batch_size):
-            actor_losses = []
-            critic_losses = []
-            alpha_losses = []
+        if self.is_rl_training_enabled and len(self.replay_buffer) >= min(
+                self.init_random_batches * self.datamodule.train_batch_size,
+                self.replay_buffer_size - self.rl_batch_size):
+            self.rl_training_step(optimizer_actor, optimizer_critic, optimizer_alpha, env_state.current_batch_size)
 
-            for iter_idx in range(self.rl_iters_per_step):
-                rl_batch = self.replay_buffer.sample()
-                rl_batch = rl_batch.to(self.device)
-                loss_td = self.rl_loss_module(rl_batch)
-
-                actor_loss = loss_td["loss_actor"]
-                q_loss = loss_td["loss_qvalue"]
-                alpha_loss = loss_td["loss_alpha"]
-
-                # Update actor
-                optimizer_actor.zero_grad()
-                self.manual_backward(actor_loss)
-                optimizer_actor.step()
-                actor_losses.append(actor_loss.mean().item())
-
-                # Update critic
-                optimizer_critic.zero_grad()
-                self.manual_backward(q_loss)
-                optimizer_critic.step()
-                critic_losses.append(q_loss.mean().item())
-
-                # Update alpha
-                optimizer_alpha.zero_grad()
-                self.manual_backward(alpha_loss)
-                optimizer_alpha.step()
-                alpha_losses.append(alpha_loss.mean().item())
-
-                self.target_net_updater.step()
-
-            self.log(name='train/actor_loss', value=sum(actor_losses) / len(actor_losses), on_step=True, on_epoch=False,
-                     batch_size=env_state.current_batch_size)
-            self.log(name='train/critic_loss', value=sum(critic_losses) / len(critic_losses), on_step=True,
-                     on_epoch=False, batch_size=env_state.current_batch_size)
-            self.log(name='train/alpha_loss', value=sum(alpha_losses) / len(alpha_losses), on_step=True, on_epoch=False,
-                     batch_size=env_state.current_batch_size)
-
-        if self.global_step > self.init_backbone_batches * 3:
+        if self.is_backbone_training_enabled and self.global_step > self.init_backbone_batches * 3:
             if is_done:
                 optimizer_backbone.zero_grad()
                 self.manual_backward(backbone_loss)
@@ -575,8 +611,9 @@ class ClassificationRlMAE(BaseRlMAE):
         if is_done:
             self.log_metric(mode, 'accuracy', out.detach(), target, on_epoch=True, batch_size=latent.shape[0])
 
-        score = torch.nn.functional.softmax(out, dim=-1)
-        score = score[torch.arange(score.shape[0]), target]
-        score = score * 10
+        # score = torch.nn.functional.softmax(out, dim=-1)
+        # score = score[torch.arange(score.shape[0]), target]
+        # score = score * 10
+        score = -loss * 10
 
         return out, loss.mean(), score.reshape(score.shape[0], 1)
