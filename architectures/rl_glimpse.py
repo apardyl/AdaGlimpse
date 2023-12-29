@@ -16,7 +16,7 @@ from torchrl.objectives import SACLoss, SoftUpdate
 
 from architectures.base import AutoconfigLightningModule
 from architectures.mae import MaskedAutoencoderViT, mae_vit_base_patch16, mae_vit_small_patch16, mae_vit_large_patch16
-from architectures.rl.glimpse_engine import glimpse_engine
+from architectures.rl.glimpse_engine import glimpse_engine, BaseGlimpseEngine
 from architectures.rl.shared_memory import SharedMemory
 from architectures.rl.transformer_actor_critic import TransformerActorCritic
 from architectures.utils import MetricMixin, RevNormalizer, filter_checkpoint
@@ -79,6 +79,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         self.train_loader = None
         self.val_loader = None
         self.test_loader = None
+        self.engine: Optional[BaseGlimpseEngine] = None
         self.replay_buffer = None
         self.game_state = [None] * max(self.parallel_games, 1)
         self.add_pos_embed = True
@@ -259,49 +260,13 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         return torch.zeros((batch_size, 0))
 
     def train_dataloader(self) -> TRAIN_DATALOADERS:
-        return glimpse_engine(
-            dataloader=self.train_loader,
-            max_glimpses=self.num_glimpses,
-            glimpse_grid_size=self.glimpse_grid_size,
-            native_patch_size=(16, 16),
-            batch_size=self.datamodule.train_batch_size,
-            max_glimpse_size_ratio=self.max_glimpse_size_ratio,
-            device=self.device,
-            image_size=self.datamodule.image_size,
-            num_parallel_games=self.parallel_games,
-            create_target_tensor_fn=self._create_target_tensor_fn,
-            copy_target_tensor_fn=self._copy_target_tensor_fn
-        )
+        return self.engine.get_loader(dataloader=self.train_loader)
 
     def val_dataloader(self) -> EVAL_DATALOADERS:
-        return glimpse_engine(
-            dataloader=self.datamodule.val_dataloader(),
-            max_glimpses=self.num_glimpses,
-            glimpse_grid_size=self.glimpse_grid_size,
-            native_patch_size=(16, 16),
-            batch_size=self.datamodule.eval_batch_size,
-            max_glimpse_size_ratio=self.max_glimpse_size_ratio,
-            device=self.device,
-            image_size=self.datamodule.image_size,
-            num_parallel_games=self.parallel_games,
-            create_target_tensor_fn=self._create_target_tensor_fn,
-            copy_target_tensor_fn=self._copy_target_tensor_fn
-        )
+        return self.engine.get_loader(dataloader=self.val_loader)
 
     def test_dataloader(self) -> EVAL_DATALOADERS:
-        return glimpse_engine(
-            dataloader=self.datamodule.test_dataloader(),
-            max_glimpses=self.num_glimpses,
-            glimpse_grid_size=self.glimpse_grid_size,
-            native_patch_size=(16, 16),
-            batch_size=self.datamodule.eval_batch_size,
-            max_glimpse_size_ratio=self.max_glimpse_size_ratio,
-            device=self.device,
-            image_size=self.datamodule.image_size,
-            num_parallel_games=self.parallel_games,
-            create_target_tensor_fn=self._create_target_tensor_fn,
-            copy_target_tensor_fn=self._copy_target_tensor_fn
-        )
+        return self.engine.get_loader(dataloader=self.test_loader)
 
     def prepare_data(self) -> None:
         self.datamodule.prepare_data()
@@ -337,6 +302,19 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
 
         if stage == 'test':
             self.test_loader = self.datamodule.test_dataloader()
+
+        self.engine = glimpse_engine(
+            max_glimpses=self.num_glimpses,
+            glimpse_grid_size=self.glimpse_grid_size,
+            native_patch_size=(16, 16),
+            batch_size=max(self.datamodule.train_batch_size, self.datamodule.eval_batch_size),
+            max_glimpse_size_ratio=self.max_glimpse_size_ratio,
+            device=self.device,
+            image_size=self.datamodule.image_size,
+            num_parallel_games=self.parallel_games,
+            create_target_tensor_fn=self._create_target_tensor_fn,
+            copy_target_tensor_fn=self._copy_target_tensor_fn
+        )
 
     def on_train_start(self) -> None:
         super().on_train_start()

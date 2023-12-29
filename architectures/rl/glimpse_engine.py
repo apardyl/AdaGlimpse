@@ -1,6 +1,7 @@
 from abc import abstractmethod, ABC
 from multiprocessing import get_context
-from typing import Tuple, Iterator, List, Callable, Dict
+from time import sleep
+from typing import Tuple, Iterator, List, Callable, Dict, Iterable
 
 import torch.utils.data
 from torch import Tensor
@@ -12,11 +13,10 @@ from architectures.rl.shared_memory import SharedMemory
 
 
 class BaseGlimpseEngine(ABC):
-    def __init__(self, dataloader: torch.utils.data.DataLoader, max_glimpses: int, glimpse_grid_size: int,
+    def __init__(self, max_glimpses: int, glimpse_grid_size: int,
                  batch_size: int, image_size: Tuple[int, int], native_patch_size: Tuple[int, int],
                  max_glimpse_size_ratio: float, device: torch.device, create_target_tensor_fn: Callable[[int], Tensor],
                  copy_target_tensor_fn: Callable[[Tensor, Dict[str, Tensor]], None]) -> None:
-        self.dataloader = dataloader
         self.max_glimpses = max_glimpses
         self.glimpse_grid_size = glimpse_grid_size
         self.batch_size = batch_size
@@ -41,24 +41,32 @@ class BaseGlimpseEngine(ABC):
             copy_target_tensor_fn=self.copy_target_tensor_fn
         )
 
-    def __len__(self) -> int:
-        return len(self.dataloader) * (self.max_glimpses + 1)
-
     @abstractmethod
-    def __iter__(self) -> Iterator[Tuple[SharedMemory, int]]:
+    def get_loader(self, dataloader) -> Iterable:
         raise NotImplementedError()
 
 
 class SyncGlimpseEngine(BaseGlimpseEngine):
-    def __iter__(self) -> Iterator[Tuple[SharedMemory, int]]:
-        state = self._build_shared_memory()
+    class _GlimpseIterator:
+        def __init__(self, engine: 'SyncGlimpseEngine', dataloader):
+            self.engine = engine
+            self.dataloader = dataloader
 
-        for batch in self.dataloader:
-            state.set_batch(batch)
-            yield state, 0
-            while not state.is_done:
-                self.sampler.sample(images_cpu=batch['image'], shared_memory=state)
+        def __iter__(self) -> Iterator[Tuple[SharedMemory, int]]:
+            state = self.engine._build_shared_memory()
+
+            for batch in self.dataloader:
+                state.set_batch(batch)
                 yield state, 0
+                while not state.is_done:
+                    self.engine.sampler.sample(images_cpu=batch['image'], shared_memory=state)
+                    yield state, 0
+
+        def __len__(self) -> int:
+            return len(self.dataloader) * (self.engine.max_glimpses + 1)
+
+    def get_loader(self, dataloader) -> Iterable:
+        return SyncGlimpseEngine._GlimpseIterator(self, dataloader)
 
 
 # noinspection PyUnusedLocal
@@ -85,6 +93,36 @@ class ParallelGlimpseEngine(BaseGlimpseEngine):
         super().__init__(*args, **kwargs)
         self.num_parallel_games = num_parallel_games
 
+        self.games = []
+        self.cpu_images = []
+
+        mp = get_context('spawn')
+
+        for _ in range(self.num_parallel_games):
+            self.games.append(self._build_shared_memory())
+            self.cpu_images.append(torch.zeros(self.batch_size, 3, *self.image_size, device='cpu').share_memory_())
+
+        self.process_queue = mp.Queue()
+        self.ready_queue = mp.Queue()
+
+        self.context = spawn(
+            fn=glimpse_worker,
+            args=(self.process_queue, self.ready_queue, self.games, self.cpu_images, self.sampler),
+            nprocs=self.num_parallel_games, join=False, daemon=True
+        )
+
+        self.games_playing = 0
+        self.version = 0
+
+    def close(self):
+        for game_idx in range(self.num_parallel_games):
+            self.process_queue.put(None)
+        self.context.join(timeout=5)
+        self.process_queue.close()
+        self.ready_queue.close()
+        for game_idx in range(self.num_parallel_games):
+            self.games[game_idx].close()
+
     @staticmethod
     def _load_next_batch(data_iter, game: SharedMemory, cpu_image: Tensor) -> bool:
         try:
@@ -96,54 +134,57 @@ class ParallelGlimpseEngine(BaseGlimpseEngine):
             cpu_image[:batch['image'].shape[0]].copy_(batch['image'])
             return True
 
-    def __iter__(self) -> Iterator[Tuple[SharedMemory, int]]:
-        data_iter = iter(self.dataloader)
-        games = []
-        cpu_images = []
-        for _ in range(self.num_parallel_games):
-            games.append(self._build_shared_memory())
-            cpu_images.append(torch.zeros(self.batch_size, 3, *self.image_size, device='cpu').share_memory_())
-        for game_idx in range(self.num_parallel_games):
-            if not self._load_next_batch(data_iter, games[game_idx], cpu_images[game_idx]):
-                raise RuntimeError('not enough data to populate glimpse games')
+    class _GlimpseIterator:
+        def __init__(self, engine: 'ParallelGlimpseEngine', dataloader):
+            self.engine = engine
+            self.dataloader = dataloader
 
-        games_playing = self.num_parallel_games
+        def __iter__(self) -> Iterator[Tuple[SharedMemory, int]]:
+            if self.engine.games_playing > 0:
+                # wait for other games to finish.
+                sleep(1)
+                # drain worker queue.
+                while not self.engine.ready_queue.empty():
+                    self.engine.ready_queue.get(timeout=1)
 
-        mp = get_context('spawn')
+            self.engine.version += 1
+            version = self.engine.version
 
-        process_queue = mp.Queue()
-        ready_queue = mp.Queue()
+            data_iter = iter(self.dataloader)
 
-        context = spawn(fn=glimpse_worker, args=(process_queue, ready_queue, games, cpu_images, self.sampler),
-                        nprocs=self.num_parallel_games, join=False, daemon=True)
+            for game_idx in range(self.engine.num_parallel_games):
+                if not self.engine._load_next_batch(
+                        data_iter, self.engine.games[game_idx], self.engine.cpu_images[game_idx]):
+                    raise RuntimeError('not enough data to populate glimpse games')
 
-        for game_idx in range(self.num_parallel_games):
-            ready_queue.put(game_idx)
+            self.engine.games_playing = self.engine.num_parallel_games
 
-        while games_playing > 0:
-            game_idx = ready_queue.get()
-            if game_idx is None:
-                context.join(2.)
-                raise RuntimeError('worker error')
+            for game_idx in range(self.engine.num_parallel_games):
+                self.engine.ready_queue.put(game_idx)
 
-            yield games[game_idx], game_idx
+            while self.engine.games_playing > 0:
+                game_idx = self.engine.ready_queue.get()
+                if game_idx is None:
+                    self.engine.context.join(2.)
+                    raise RuntimeError('worker error')
 
-            if not games[game_idx].is_done:
-                process_queue.put(game_idx)
-            else:
-                if self._load_next_batch(data_iter, games[game_idx], cpu_images[game_idx]):
-                    ready_queue.put(game_idx)
+                yield self.engine.games[game_idx], game_idx
+                assert version == self.engine.version  # check if no other process is using the same worker pool
+
+                if not self.engine.games[game_idx].is_done:
+                    self.engine.process_queue.put(game_idx)
                 else:
-                    games_playing -= 1
+                    if self.engine._load_next_batch(data_iter, self.engine.games[game_idx],
+                                                    self.engine.cpu_images[game_idx]):
+                        self.engine.ready_queue.put(game_idx)
+                    else:
+                        self.engine.games_playing -= 1
 
-        # stop workers
-        for game_idx in range(self.num_parallel_games):
-            process_queue.put(None)
-        context.join(timeout=5)
-        process_queue.close()
-        ready_queue.close()
-        for game_idx in range(self.num_parallel_games):
-            games[game_idx].close()
+        def __len__(self) -> int:
+            return len(self.dataloader) * (self.engine.max_glimpses + 1)
+
+    def get_loader(self, dataloader) -> Iterable:
+        return ParallelGlimpseEngine._GlimpseIterator(self, dataloader)
 
 
 def glimpse_engine(*args, num_parallel_games=0, **kwargs):
