@@ -69,7 +69,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
 
         self.rl_loss_module = SACLoss(actor_network=self.actor_critic.policy_module,
                                       qvalue_network=self.actor_critic.qvalue_module,
-                                      loss_function='smooth_l1',
+                                      loss_function='l2',
                                       delay_actor=False,
                                       delay_qvalue=True,
                                       alpha_init=1.0)
@@ -611,9 +611,8 @@ class ClassificationRlMAE(BaseRlMAE):
         if is_done:
             self.log_metric(mode, 'accuracy', out.detach(), target, on_epoch=True, batch_size=latent.shape[0])
 
-        # score = torch.nn.functional.softmax(out, dim=-1)
-        # score = score[torch.arange(score.shape[0]), target]
-        # score = score * 10
-        score = -loss * 10
+        score = torch.nn.functional.softmax(out, dim=-1)
+        score = score[torch.arange(score.shape[0]), target]
+        score = score * 10
 
         return out, loss.mean(), score.reshape(score.shape[0], 1)

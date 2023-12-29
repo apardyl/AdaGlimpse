@@ -16,8 +16,6 @@ from lightning.pytorch.strategies import DDPStrategy
 from architectures.base import AutoconfigLightningModule
 from utils.prepare import experiment_from_args
 
-random.seed(1)
-torch.manual_seed(1)
 torch.set_float32_matmul_precision('high')
 
 
@@ -47,12 +45,19 @@ def define_args(parent_parser):
                         type=bool,
                         default=False,
                         action=argparse.BooleanOptionalAction)
+    parser.add_argument('--seed',
+                        help='random seed',
+                        type=int,
+                        default=1)
     return parent_parser
 
 
 def main():
     model: AutoconfigLightningModule
     data_module, model, args = experiment_from_args(sys.argv, add_argparse_args_fn=define_args)
+
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
 
     plugins = []
 
