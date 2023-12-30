@@ -31,7 +31,8 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
     def __init__(self, datamodule: BaseDataModule, backbone_size='base', pretrained_mae_path=None, num_glimpses=14,
                  max_glimpse_size_ratio=1.0, glimpse_grid_size=2, rl_iters_per_step=1, epochs=100,
                  init_random_batches=100, init_backbone_batches=50000, rl_batch_size=64, replay_buffer_size=10000,
-                 lr=3e-4, backbone_lr=1e-5, parallel_games=0, backbone_training_type: str = 'constant', **_) -> None:
+                 lr=3e-4, backbone_lr=1e-5, parallel_games=0, backbone_training_type: str = 'constant',
+                 rl_loss_function: str = 'smooth_l1', **_) -> None:
         super().__init__()
 
         self.steps_per_epoch = None
@@ -69,7 +70,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
 
         self.rl_loss_module = SACLoss(actor_network=self.actor_critic.policy_module,
                                       qvalue_network=self.actor_critic.qvalue_module,
-                                      loss_function='l2',
+                                      loss_function=rl_loss_function,
                                       delay_actor=False,
                                       delay_qvalue=True,
                                       alpha_init=1.0)
@@ -130,6 +131,10 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                             help='type of backbone training regime',
                             choices=['disabled', 'constant', 'alternating'],
                             default='constant',
+                            type=str)
+        parser.add_argument('--rl-loss-function',
+                            help='type of loss function for rl training',
+                            default='smooth_l1',
                             type=str)
         parser.add_argument('--rl-batch-size',
                             help='batch size of the rl loop',
@@ -325,6 +330,8 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         if isinstance(self.trainer.strategy, ParallelStrategy):
             self.train_loader.sampler.set_epoch(self.trainer.current_epoch)
 
+        self.replay_buffer.empty()
+
     @abstractmethod
     def _forward_task(self, state: SharedMemory, latent: torch.Tensor, is_done: bool, with_loss_and_grad: bool,
                       mode: str):
@@ -479,9 +486,9 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
 
         optimizer_actor, optimizer_critic, optimizer_alpha, optimizer_backbone = self.optimizers()
 
-        if self.is_rl_training_enabled and len(self.replay_buffer) >= min(
+        if self.is_rl_training_enabled and len(self.replay_buffer) >= max(min(
                 self.init_random_batches * self.datamodule.train_batch_size,
-                self.replay_buffer_size - self.rl_batch_size):
+                self.replay_buffer_size - self.rl_batch_size), self.rl_batch_size):
             self.rl_training_step(optimizer_actor, optimizer_critic, optimizer_alpha, env_state.current_batch_size)
 
         if self.is_backbone_training_enabled and self.global_step > self.init_backbone_batches * 3:
