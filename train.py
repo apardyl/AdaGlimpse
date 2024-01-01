@@ -2,7 +2,6 @@ import argparse
 import datetime
 import os
 import platform
-import random
 import sys
 import time
 
@@ -45,19 +44,12 @@ def define_args(parent_parser):
                         type=bool,
                         default=False,
                         action=argparse.BooleanOptionalAction)
-    parser.add_argument('--seed',
-                        help='random seed',
-                        type=int,
-                        default=1)
     return parent_parser
 
 
 def main():
     model: AutoconfigLightningModule
     data_module, model, args = experiment_from_args(sys.argv, add_argparse_args_fn=define_args)
-
-    random.seed(args.seed)
-    torch.manual_seed(args.seed)
 
     plugins = []
 
@@ -74,7 +66,7 @@ def main():
         loggers.append(TensorBoardLogger(save_dir='logs/', name=run_name))
 
     callbacks = [
-        ModelCheckpoint(dirpath=f"checkpoints/{run_name}", monitor=model.checkpoint_metric),
+        ModelCheckpoint(dirpath=f"checkpoints/{run_name}", monitor=model.checkpoint_metric, save_last=True),
         RichProgressBar(leave=True, theme=RichProgressBarTheme(metrics_format='.2e')),
         RichModelSummary(max_depth=3),
         LearningRateMonitor(logging_interval='step')

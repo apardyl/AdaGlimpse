@@ -77,7 +77,7 @@ class Sun360Classification(BaseClassificationDataModule):
             self.val_dataset = ClassificationDataset(file_list=val_list, label_list=val_labels,
                                                      transform=get_default_img_transform(self.image_size))
         else:
-            raise NotImplemented()
+            raise NotImplementedError()
 
 
 class ImageNetWithStats(ImageNet):
@@ -106,8 +106,12 @@ class ImageNet1k(BaseClassificationDataModule):
                                                    three_augment(self.image_size))
             self.val_dataset = ImageNetWithStats(root=self.data_dir, split='val',
                                                  transform=get_default_img_transform(self.image_size))
+        elif stage == 'test':
+            # use val as test.
+            self.test_dataset = ImageNetWithStats(root=self.data_dir, split='val',
+                                                  transform=get_default_img_transform(self.image_size))
         else:
-            raise NotImplemented()
+            raise NotImplementedError()
 
     def _load_to_memfs(self) -> None:
         os.mkdir(self.data_dir)

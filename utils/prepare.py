@@ -1,7 +1,9 @@
 import argparse
 import inspect
+import random
 
 import lightning
+import torch
 
 import architectures
 import datasets
@@ -30,6 +32,11 @@ def experiment_from_args(argv, prog_name='TrainWhereToLookNext',
         prog=f'{prog_name} {main_args.dataset} {main_args.arch}',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
+    parser.add_argument('--seed',
+                        help='random seed',
+                        type=int,
+                        default=1)
+
     parser = arch_class.add_argparse_args(parser)
     parser = data_module_class.add_argparse_args(parser)
     if add_argparse_args_fn is not None:
@@ -43,8 +50,12 @@ def experiment_from_args(argv, prog_name='TrainWhereToLookNext',
     setattr(args, 'dataset', main_args.dataset)
     setattr(args, 'arch', main_args.arch)
 
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
+
     args_dict = vars(args)
 
+    # noinspection PyArgumentList
     data_module = data_module_class(**args_dict)
     model = arch_class(data_module, **args_dict)
 

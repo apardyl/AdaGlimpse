@@ -38,6 +38,12 @@ def define_args(parent_parser):
         type=str,
         required=True
     )
+    parser.add_argument(
+        "--random-samples",
+        help='sample random images from the dataset',
+        type=int,
+        default=None
+    )
     return parent_parser
 
 
@@ -51,6 +57,7 @@ class RLUserHook:
         self.patches = []
         self.current_out = []
         self.current_scores = []
+        self.targets = []
 
     def __call__(self, env_state: SharedMemory, out, score):
         self.current_out.append(out.clone().detach().cpu())
@@ -64,6 +71,7 @@ class RLUserHook:
             self.current_out = []
             self.scores.append(torch.stack(self.current_scores, dim=1))
             self.current_scores = []
+            self.targets.append(env_state.target.clone().detach().cpu())
 
     def compute(self):
         return {
@@ -71,7 +79,8 @@ class RLUserHook:
             "out": torch.cat(self.out, dim=0),
             "scores": torch.cat(self.scores, dim=0),
             "coords": torch.cat(self.coords, dim=0),
-            "patches": torch.cat(self.patches, dim=0)
+            "patches": torch.cat(self.patches, dim=0),
+            "targets": torch.cat(self.targets, dim=0)
         }
 
 
@@ -107,29 +116,64 @@ class Coords:
         return self.area() < other.area()
 
 
-def show_grid(grid, name):
+class GridField:
+    size_ratio = .3
+
+    def __init__(self, data):
+        self.data = data
+
+    def render(self, axs):
+        raise NotImplementedError()
+
+
+class ImageGridField(GridField):
+    size_ratio = 3.5
+
+    def render(self, axs):
+        if len(self.data.shape) == 3:
+            if self.data.shape[0] == 3:
+                self.data = self.data.permute((1, 2, 0))
+
+        axs.imshow(self.data, resample=False)
+        axs.set(xticklabels=[], yticklabels=[], xticks=[], yticks=[])
+
+
+class ScoreGridField(GridField):
+    def render(self, axs):
+        axs.set_axis_off()
+        axs.text(0.15, 0.4, f'Score: {float(self.data):.3f}', font={'size': 18})
+
+
+class ClsPredictionGridField(GridField):
+    def render(self, axs):
+        self.data = torch.nn.functional.softmax(self.data, dim=-1)
+        pred = torch.argmax(self.data, dim=-1)
+        score = self.data[pred]
+        axs.set_axis_off()
+        axs.text(0.2, 0.4, f'Pred: {int(pred)}\nProb: {float(score):.3f}', font={'size': 18})
+
+
+class ClsTargetGridField(GridField):
+    def render(self, axs):
+        axs.set_axis_off()
+        axs.text(0.15, 0.4, f'Label: {int(self.data)}', font={'size': 18})
+
+
+def show_grid(grid: List[List[Optional[GridField]]], name):
     rows = len(grid[0])
     columns = len(grid)
-    size = round(grid[0][0].shape[-1] / 100 + 1, 0)
+    size = 3
+    height_ratios = [row.size_ratio for row in grid[-1]]
     fig, axs = plt.subplots(
-        figsize=(columns * size, rows * size), ncols=columns, nrows=rows, squeeze=False,
-        height_ratios=([5] * (rows - 1) + [1])
+        figsize=(columns * size, sum(height_ratios)), ncols=columns, nrows=rows, squeeze=False,
+        height_ratios=height_ratios
     )
-    for y, row in enumerate(grid):
-        for x, field in enumerate(row):
+    for x, col in enumerate(grid):
+        for y, field in enumerate(col):
             if field is not None:
-                if len(field.shape) == 1 and field.shape[0] == 1:
-                    axs[x, y].set_axis_off()
-                    axs[x, y].text(0.15, 0.4, f'Score: {float(field):.3f}',
-                                   font={'size': 18})
-                else:
-                    if len(field.shape) == 3:
-                        if field.shape[0] == 3:
-                            field = field.permute((1, 2, 0))
-                    axs[x, y].imshow(field, resample=False)
-                    axs[x, y].set(xticklabels=[], yticklabels=[], xticks=[], yticks=[])
+                field.render(axs[y, x])
             else:
-                axs[x, y].set_axis_off()
+                axs[y, x].set_axis_off()
     plt.tight_layout()
     plt.savefig(name)
 
@@ -155,7 +199,8 @@ def bbox_map(img, coords, merged_coords):
         [c.bbox() for c in merged_coords],
         dtype=torch.float,
     )
-    colors = ["black"] * (len(coords) - 1) + ["red"]
+    boxes_per_glimpse = (len(coords) // len(merged_coords))
+    colors = ["black"] * (len(coords) - boxes_per_glimpse) + ["red"] * boxes_per_glimpse
     merged_colors = ["black"] * (len(merged_coords) - 1) + ["red"]
     img = torchvision.utils.draw_bounding_boxes(img, boxes, colors=colors, width=1)
     img = torchvision.utils.draw_bounding_boxes(img, merged_boxes, colors=merged_colors, width=3)
@@ -171,16 +216,34 @@ def selection_map(mask, patch_size):
 
 
 def visualize_one(model: BaseRlMAE, image: Tensor, out: Tensor, coords: Tensor, patches: Tensor, scores: Tensor,
-                  save_path: str, rev_normalizer) -> None:
+                  target: Tensor, save_path: str, rev_normalizer) -> None:
     num_glimpses = model.num_glimpses
     patches_per_glimpse = coords.shape[0] // num_glimpses
     assert patches_per_glimpse * num_glimpses == coords.shape[0]  # assert if divisible by num_glimpses
 
-    out = model.mae.unpatchify(out)
-    out = rev_normalizer(out).to(torch.uint8)
+    if len(out.shape) == 3:
+        # reconstruction
+        out = model.mae.unpatchify(out)
+        out = rev_normalizer(out).to(torch.uint8)
 
-    grid: List[List[Optional[Tensor]]] = [
-        [image, None, out[0], scores[0]]
+        pred_field = ImageGridField
+        target_field = None
+    elif len(out.shape) == 2:
+        # classification
+        pred_field = ClsPredictionGridField
+        target_field = ClsTargetGridField
+
+    else:
+        raise NotImplementedError()
+
+    grid: List[List[Optional[GridField]]] = [
+        [
+            ImageGridField(image),
+            None,
+            pred_field(out[0])
+        ]
+        + ([target_field(target)] if target_field is not None else [])
+        + [ScoreGridField(scores[0])]
     ]
 
     coords = [Coords.from_tensor(x) for x in coords]
@@ -191,12 +254,15 @@ def visualize_one(model: BaseRlMAE, image: Tensor, out: Tensor, coords: Tensor, 
         start_idx = glimpse_idx * patches_per_glimpse
         end_idx = start_idx + patches_per_glimpse
 
-        grid.append([
-            bbox_map(image, coords[:end_idx], merged_coords[:glimpse_idx + 1]),
-            glimpse_map(patches, coords[:end_idx], image.shape),
-            out[glimpse_idx + 1],
-            scores[glimpse_idx + 1]
-        ])
+        grid.append(
+            [
+                ImageGridField(bbox_map(image, coords[:end_idx], merged_coords[:glimpse_idx + 1])),
+                ImageGridField(glimpse_map(patches, coords[:end_idx], image.shape)),
+                pred_field(out[glimpse_idx + 1])
+            ]
+            + ([target_field(target)] if target_field is not None else [])
+            + [ScoreGridField(scores[glimpse_idx + 1])]
+        )
 
     show_grid(grid, save_path)
 
@@ -208,10 +274,10 @@ def visualize(visualization_path, model):
     images = rev_normalizer(data["images"]).to(torch.uint8)
     patches = rev_normalizer(data["patches"]).to(torch.uint8)
 
-    for idx, (img, out, coord, patch, score) in enumerate(tqdm(
-            zip(images, data["out"], data["coords"], patches, data['scores']),
+    for idx, (img, out, coord, patch, score, target) in enumerate(tqdm(
+            zip(images, data["out"], data["coords"], patches, data['scores'], data['targets']),
             total=images.shape[0])):
-        visualize_one(model, img, out, coord, patch, score,
+        visualize_one(model, img, out, coord, patch, score, target,
                       os.path.join(visualization_path, f"{idx}.png"), rev_normalizer)
 
 
@@ -220,6 +286,8 @@ def main():
     data_module, model, args = experiment_from_args(
         sys.argv, add_argparse_args_fn=define_args
     )
+
+    data_module.num_random_eval_samples = args.random_samples
 
     model.load_pretrained(args.model_checkpoint)
 

@@ -17,6 +17,7 @@ from torchrl.objectives import SACLoss, SoftUpdate
 from architectures.base import AutoconfigLightningModule
 from architectures.mae import MaskedAutoencoderViT, mae_vit_base_patch16, mae_vit_small_patch16, mae_vit_large_patch16
 from architectures.rl.glimpse_engine import glimpse_engine, BaseGlimpseEngine
+from architectures.rl.patchmix import InPlacePatchMix
 from architectures.rl.shared_memory import SharedMemory
 from architectures.rl.transformer_actor_critic import TransformerActorCritic
 from architectures.utils import MetricMixin, RevNormalizer, filter_checkpoint
@@ -278,7 +279,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
 
     def setup(self, stage: str) -> None:
         if stage != 'fit' and stage != 'validate' and stage != 'test':
-            raise NotImplemented()
+            raise NotImplementedError()
 
         self.datamodule.setup(stage)
 
@@ -337,7 +338,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                       mode: str):
         """This function implements the task-specific forward pass of the model, including computing the loss value,
         score for RL training, as well as logging any task-specific metrics."""
-        raise NotImplemented()
+        raise NotImplementedError()
 
     def forward_game_state(self, state: SharedMemory, is_done: bool, mode: str):
         with_loss_and_grad = mode == 'train' and is_done

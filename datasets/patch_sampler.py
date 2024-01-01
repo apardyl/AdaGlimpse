@@ -17,12 +17,12 @@ class PatchSampler(ABC):
 
     @abstractmethod
     def __call__(self, img):
-        raise NotImplemented()
+        raise NotImplementedError()
 
 
 class SimplePatchSampler(PatchSampler):
     def _get_coordinates(self, img_size, img):
-        raise NotImplemented()
+        raise NotImplementedError()
 
     def __call__(self, img):
         assert len(img.shape) == 3 and img.shape[0] == 3

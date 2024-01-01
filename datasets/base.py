@@ -13,7 +13,8 @@ class BaseDataModule(LightningDataModule, abc.ABC):
     has_test_data = True
 
     def __init__(self, data_dir, train_batch_size=32, eval_batch_size=32, num_workers=8, num_samples=None,
-                 image_size=(224, 224), force_no_augment=False, mem_fs=False, always_drop_last=False, **_):
+                 image_size=(224, 224), force_no_augment=False, mem_fs=False, always_drop_last=False,
+                 force_shuffle=False, num_random_eval_samples=None, **_):
         super().__init__()
 
         self.data_dir = data_dir
@@ -24,6 +25,8 @@ class BaseDataModule(LightningDataModule, abc.ABC):
         self.image_size = image_size
         self.force_no_augment = force_no_augment
         self.always_drop_last = always_drop_last
+        self.force_shuffle = force_shuffle
+        self.num_random_eval_samples = num_random_eval_samples
 
         self.train_dataset = None
         self.test_dataset = None
@@ -82,16 +85,22 @@ class BaseDataModule(LightningDataModule, abc.ABC):
 
     def test_dataloader(self, sampler=None) -> EVAL_DATALOADERS:
         print(f'Loaded {len(self.test_dataset)} test samples', file=sys.stderr)
-        return DataLoader(self.test_dataset, batch_size=self.eval_batch_size, sampler=sampler, shuffle=False,
-                          num_workers=self.num_workers, pin_memory=True, drop_last=self.always_drop_last)
+        if self.num_random_eval_samples is not None:
+            sampler = RandomSampler(self.test_dataset, replacement=True, num_samples=self.num_random_eval_samples)
+        return DataLoader(self.test_dataset, batch_size=self.eval_batch_size, sampler=sampler,
+                          shuffle=self.force_shuffle, num_workers=self.num_workers, pin_memory=True,
+                          drop_last=self.always_drop_last)
 
     def val_dataloader(self, sampler=None) -> EVAL_DATALOADERS:
         print(f'Loaded {len(self.val_dataset)} val samples', file=sys.stderr)
-        return DataLoader(self.val_dataset, batch_size=self.eval_batch_size, sampler=sampler, shuffle=False,
-                          num_workers=self.num_workers, pin_memory=True, drop_last=self.always_drop_last)
+        if self.num_random_eval_samples is not None:
+            sampler = RandomSampler(self.val_dataset, replacement=True, num_samples=self.num_random_eval_samples)
+        return DataLoader(self.val_dataset, batch_size=self.eval_batch_size, sampler=sampler,
+                          shuffle=self.force_shuffle, num_workers=self.num_workers, pin_memory=True,
+                          drop_last=self.always_drop_last)
 
     def _load_to_memfs(self):
-        raise NotImplemented()
+        raise NotImplementedError()
 
     def prepare_data(self) -> None:
         if self.mem_fs:

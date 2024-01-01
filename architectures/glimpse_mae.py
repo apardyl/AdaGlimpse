@@ -90,7 +90,7 @@ class BaseGlimpseMae(BaseArchitecture, ABC):
             checkpoint = checkpoint['state_dict']
             prefix = 'mae.'
         else:
-            raise NotImplemented()
+            raise NotImplementedError()
         del checkpoint[prefix + 'pos_embed']
         del checkpoint[prefix + 'decoder_pos_embed']
 
