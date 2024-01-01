@@ -440,6 +440,12 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         self.log(name='train/alpha_loss', value=sum(alpha_losses) / len(alpha_losses), on_step=True, on_epoch=False,
                  batch_size=batch_size)
 
+    def backbone_training_step(self, optimizer_backbone, backbone_loss, env_state):
+        optimizer_backbone.zero_grad()
+        self.manual_backward(backbone_loss)
+        optimizer_backbone.step()
+        self.log(name='train/backbone_loss', value=backbone_loss.mean().item(), on_step=True, on_epoch=False)
+
     def training_step(self, batch, batch_idx: int):
         scheduler_actor, scheduler_critic, scheduler_alpha, scheduler_backbone = self.lr_schedulers()
         scheduler_actor.step()
@@ -494,10 +500,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
 
         if self.is_backbone_training_enabled and self.global_step > self.init_backbone_batches * 3:
             if is_done:
-                optimizer_backbone.zero_grad()
-                self.manual_backward(backbone_loss)
-                optimizer_backbone.step()
-                self.log(name='train/backbone_loss', value=backbone_loss.mean().item(), on_step=True, on_epoch=False)
+                self.backbone_training_step(optimizer_backbone, backbone_loss, env_state)
 
     def inference_step(self, batch, batch_idx, mode):
         env_state: SharedMemory
@@ -574,11 +577,17 @@ class ClassificationRlMAE(BaseRlMAE):
 
         assert isinstance(self.datamodule, BaseClassificationDataModule)
 
-        self.loss_fn = torch.nn.CrossEntropyLoss(reduction='none')
+        self.loss_fn = torch.nn.BCEWithLogitsLoss()
         self.define_metric('accuracy',
                            partial(torchmetrics.classification.MulticlassAccuracy,
                                    num_classes=self.datamodule.cls_num_classes,
                                    average='micro'))
+
+        self.patch_mix = InPlacePatchMix(
+            patch_mix_alpha=1.0,
+            prob=1.0,
+            num_classes=self.datamodule.num_classes
+        )
 
     @staticmethod
     def _copy_target_tensor_fn(target: torch.Tensor, batch: Dict[str, torch.Tensor]):
@@ -588,12 +597,20 @@ class ClassificationRlMAE(BaseRlMAE):
     def _create_target_tensor_fn(batch_size: int):
         return torch.zeros(batch_size, dtype=torch.long)
 
+    def backbone_training_step(self, optimizer_backbone, backbone_loss, env_state):
+        target = self.patch_mix(env_state)
+
+        latent, pos_embed = self.mae.forward_encoder(env_state.patches, coords=env_state.coords)
+        out = self.mae.forward_head(latent)
+        loss = self.loss_fn(out, target)
+
+        super().backbone_training_step(optimizer_backbone, loss.mean(), env_state)
+
     def _forward_task(self, state: SharedMemory, latent: torch.Tensor, is_done: bool, with_loss_and_grad: bool,
                       mode: str):
         out = self.mae.forward_head(latent)
         target = state.target
 
-        loss = self.loss_fn(out, target)
         if is_done:
             self.log_metric(mode, 'accuracy', out.detach(), target, on_epoch=True, batch_size=latent.shape[0])
 
@@ -601,4 +618,4 @@ class ClassificationRlMAE(BaseRlMAE):
         score = score[torch.arange(score.shape[0]), target]
         score = score * 10
 
-        return out, loss.mean(), score.reshape(score.shape[0], 1)
+        return out, None, score.reshape(score.shape[0], 1)
