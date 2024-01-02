@@ -1,3 +1,4 @@
+import argparse
 import sys
 from abc import ABC, abstractmethod
 from contextlib import nullcontext
@@ -28,12 +29,13 @@ from datasets.classification import BaseClassificationDataModule
 class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
     internal_data = True
     checkpoint_metric = None
+    autograd_backbone = True
 
     def __init__(self, datamodule: BaseDataModule, backbone_size='base', pretrained_mae_path=None, num_glimpses=14,
                  max_glimpse_size_ratio=1.0, glimpse_grid_size=2, rl_iters_per_step=1, epochs=100,
-                 init_random_batches=100, init_backbone_batches=50000, rl_batch_size=64, replay_buffer_size=10000,
-                 lr=3e-4, backbone_lr=1e-5, parallel_games=0, backbone_training_type: str = 'constant',
-                 rl_loss_function: str = 'smooth_l1', **_) -> None:
+                 init_random_batches=100, freeze_backbone_epochs=1, rl_batch_size=64, replay_buffer_size=10000,
+                 lr=3e-4, backbone_lr=1e-5, parallel_games=2, backbone_training_type: str = 'alternating',
+                 rl_loss_function: str = 'l2', glimpse_size_penalty: float = 0., simple_reward=False, **_) -> None:
         super().__init__()
 
         self.steps_per_epoch = None
@@ -44,10 +46,12 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         self.rl_batch_size = rl_batch_size
         self.epochs = epochs
         self.init_random_batches = init_random_batches
-        self.init_backbone_batches = init_backbone_batches
+        self.freeze_backbone_epochs = freeze_backbone_epochs
         self.lr = lr
         self.backbone_lr = backbone_lr
         self.backbone_training_type = backbone_training_type
+        self.glimpse_size_penalty = glimpse_size_penalty
+        self.simple_reward = simple_reward
 
         self.replay_buffer_size = replay_buffer_size
         self.parallel_games = parallel_games
@@ -89,13 +93,15 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         self.save_hyperparameters(ignore=['datamodule'])
         self._user_forward_hook = None
 
+        self.real_train_step = 0
+
     @classmethod
     def add_argparse_args(cls, parent_parser):
         parser = parent_parser.add_argument_group(BaseRlMAE.__name__)
         parser.add_argument('--lr',
                             help='learning-rate',
                             type=float,
-                            default=3e-4)
+                            default=1e-3)
         parser.add_argument('--backbone-size',
                             help='backbone ViT size',
                             type=str,
@@ -103,7 +109,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         parser.add_argument('--backbone-lr',
                             help='backbone learning-rate',
                             type=float,
-                            default=1e-5)
+                            default=1e-4)
         parser.add_argument('--pretrained-mae-path',
                             help='path to pretrained MAE weights',
                             type=str,
@@ -123,19 +129,19 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         parser.add_argument('--init-random-batches',
                             help='number of random action batches on training start',
                             type=int,
-                            default=100)
-        parser.add_argument('--init-backbone-batches',
-                            help='number of rl pre-training steps before starting to train the backbone',
+                            default=10000)
+        parser.add_argument('--freeze-backbone-epochs',
+                            help='number of rl training epochs before starting to train the backbone',
                             type=int,
-                            default=20000)
+                            default=1)
         parser.add_argument('--backbone-training-type',
                             help='type of backbone training regime',
                             choices=['disabled', 'constant', 'alternating'],
-                            default='constant',
+                            default='alternating',
                             type=str)
         parser.add_argument('--rl-loss-function',
                             help='type of loss function for rl training',
-                            default='smooth_l1',
+                            default='l2',
                             type=str)
         parser.add_argument('--rl-batch-size',
                             help='batch size of the rl loop',
@@ -148,7 +154,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         parser.add_argument('--parallel-games',
                             help='number of parallel game workers (0 for single-threaded)',
                             type=int,
-                            default=0)
+                            default=2)
         parser.add_argument('--max-glimpse-size-ratio',
                             help='maximum glimpse size relative to full image size',
                             type=float,
@@ -157,13 +163,22 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                             help='size of glimpse sampling grid in patches along grid side',
                             type=int,
                             default=2)
+        parser.add_argument('--glimpse-size-penalty',
+                            help='penalty coefficient for large glimpses',
+                            type=float,
+                            default=0)
+        parser.add_argument('--simple-reward',
+                            help='use simple reward function rather than tracking score differences',
+                            type=bool,
+                            default=False,
+                            action=argparse.BooleanOptionalAction)
         return parent_parser
 
     def configure_optimizers(self):
         critic_params = list(self.rl_loss_module.qvalue_network_params.flatten_keys().values())
         actor_params = list(self.rl_loss_module.actor_network_params.flatten_keys().values())
 
-        actor_optimizer = torch.optim.Adam(actor_params, self.lr)
+        actor_optimizer = torch.optim.AdamW(actor_params, self.lr)
         actor_scheduler = torch.optim.lr_scheduler.OneCycleLR(
             optimizer=actor_optimizer,
             max_lr=self.lr,
@@ -173,7 +188,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
             epochs=self.epochs,
             steps_per_epoch=self.steps_per_epoch
         )
-        critic_optimizer = torch.optim.Adam(critic_params, self.lr)
+        critic_optimizer = torch.optim.AdamW(critic_params, self.lr)
         critic_scheduler = torch.optim.lr_scheduler.OneCycleLR(
             optimizer=critic_optimizer,
             max_lr=self.lr,
@@ -183,7 +198,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
             epochs=self.epochs,
             steps_per_epoch=self.steps_per_epoch
         )
-        alpha_optimizer = torch.optim.Adam([self.rl_loss_module.log_alpha], self.lr)
+        alpha_optimizer = torch.optim.AdamW([self.rl_loss_module.log_alpha], self.lr)
         alpha_scheduler = torch.optim.lr_scheduler.OneCycleLR(
             optimizer=alpha_optimizer,
             max_lr=self.lr,
@@ -193,7 +208,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
             epochs=self.epochs,
             steps_per_epoch=self.steps_per_epoch
         )
-        backbone_optimizer = torch.optim.Adam(self.mae.parameters(), self.lr)
+        backbone_optimizer = torch.optim.AdamW(self.mae.parameters(), self.lr)
         backbone_scheduler = torch.optim.lr_scheduler.OneCycleLR(
             optimizer=backbone_optimizer,
             max_lr=self.backbone_lr,
@@ -342,7 +357,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
 
     def forward_game_state(self, state: SharedMemory, is_done: bool, mode: str):
         with_loss_and_grad = mode == 'train' and is_done
-        with nullcontext() if with_loss_and_grad else torch.no_grad():
+        with nullcontext() if self.autograd_backbone and with_loss_and_grad else torch.no_grad():
             step = state.current_glimpse
             latent, pos_embed = self.mae.forward_encoder(state.patches, coords=state.coords)
 
@@ -384,12 +399,16 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
 
     @property
     def is_rl_training_enabled(self):
+        if self.freeze_backbone_epochs > self.current_epoch:
+            return True
         if self.backbone_training_type == 'alternating':
             return self.current_epoch % 2 == 0
         return True
 
     @property
     def is_backbone_training_enabled(self):
+        if self.freeze_backbone_epochs > self.current_epoch:
+            return False
         if self.backbone_training_type == 'disabled':
             return False
         elif self.backbone_training_type == 'constant':
@@ -452,6 +471,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         scheduler_critic.step()
         scheduler_alpha.step()
         scheduler_backbone.step()
+        self.real_train_step += 1
 
         env_state: SharedMemory
         game_idx: int
@@ -461,7 +481,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         next_state, step, backbone_loss = self.forward_game_state(env_state, is_done, mode='train')
         if not is_done:
             # calculate action and submit it.
-            if self.global_step * 3 < self.init_random_batches:
+            if self.real_train_step < self.init_random_batches:
                 next_action = self.random_action(next_state.batch_size[0]).to(self.device)
             else:
                 next_action = self.forward_action(next_state, exploration_type=ExplorationType.RANDOM)
@@ -487,20 +507,24 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                 self.game_state[game_idx] = None
 
             # calculate reward.
-            state['next', 'reward'] = state['next', 'score'] - state['score']
+            if self.simple_reward:
+                state['next', 'reward'] = state['next', 'score']
+            else:
+                state['next', 'reward'] = state['next', 'score'] - state['score']
+
+            if self.glimpse_size_penalty > 0.:
+                state['next', 'reward'] = (state['next', 'reward'] -
+                                           state['next', 'action'][:, -1] * self.glimpse_size_penalty)
 
             self.replay_buffer.extend(state)
 
         optimizer_actor, optimizer_critic, optimizer_alpha, optimizer_backbone = self.optimizers()
 
-        if self.is_rl_training_enabled and len(self.replay_buffer) >= max(min(
-                self.init_random_batches * self.datamodule.train_batch_size,
-                self.replay_buffer_size - self.rl_batch_size), self.rl_batch_size):
+        if self.is_rl_training_enabled and len(self.replay_buffer) >= self.replay_buffer_size:
             self.rl_training_step(optimizer_actor, optimizer_critic, optimizer_alpha, env_state.current_batch_size)
 
-        if self.is_backbone_training_enabled and self.global_step > self.init_backbone_batches * 3:
-            if is_done:
-                self.backbone_training_step(optimizer_backbone, backbone_loss, env_state)
+        if self.is_backbone_training_enabled and is_done:
+            self.backbone_training_step(optimizer_backbone, backbone_loss, env_state)
 
     def inference_step(self, batch, batch_idx, mode):
         env_state: SharedMemory
@@ -571,8 +595,9 @@ class ReconstructionRlMAE(BaseRlMAE):
 
 class ClassificationRlMAE(BaseRlMAE):
     checkpoint_metric = 'val/accuracy'
+    autograd_backbone = False
 
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self, *args, patch_mix_alpha: float = 1.0, patch_mix_prob: float = 1.0, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
         assert isinstance(self.datamodule, BaseClassificationDataModule)
@@ -584,10 +609,24 @@ class ClassificationRlMAE(BaseRlMAE):
                                    average='micro'))
 
         self.patch_mix = InPlacePatchMix(
-            patch_mix_alpha=1.0,
-            prob=1.0,
+            patch_mix_alpha=patch_mix_alpha,
+            prob=patch_mix_prob,
             num_classes=self.datamodule.num_classes
         )
+
+    @classmethod
+    def add_argparse_args(cls, parent_parser):
+        parent_parser = super().add_argparse_args(parent_parser)
+        parser = parent_parser.add_argument_group(ClassificationRlMAE.__name__)
+        parser.add_argument('--patch-mix-alpha',
+                            help='patch mix alpha',
+                            type=float,
+                            default=1.0)
+        parser.add_argument('--patch-mix-prob',
+                            help='patch mix probability',
+                            type=float,
+                            default=1.0)
+        return parent_parser
 
     @staticmethod
     def _copy_target_tensor_fn(target: torch.Tensor, batch: Dict[str, torch.Tensor]):

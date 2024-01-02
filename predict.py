@@ -150,7 +150,7 @@ class ClsPredictionGridField(GridField):
         pred = torch.argmax(self.data, dim=-1)
         score = self.data[pred]
         axs.set_axis_off()
-        axs.text(0.2, 0.4, f'Pred: {int(pred)}\nProb: {float(score):.3f}', font={'size': 18})
+        axs.text(0.15, 0.3, f'Pred: {int(pred)}\nProb: {float(score):.3f}', font={'size': 18})
 
 
 class ClsTargetGridField(GridField):
@@ -176,6 +176,7 @@ def show_grid(grid: List[List[Optional[GridField]]], name):
                 axs[y, x].set_axis_off()
     plt.tight_layout()
     plt.savefig(name)
+    plt.close(fig)
 
 
 def glimpse_map(patches, coords: List[Coords], output_shape):
@@ -282,12 +283,13 @@ def visualize(visualization_path, model):
 
 
 def main():
-    model: AutoconfigLightningModule
+    model: BaseRlMAE
     data_module, model, args = experiment_from_args(
         sys.argv, add_argparse_args_fn=define_args
     )
 
     data_module.num_random_eval_samples = args.random_samples
+    model.parallel_games = 0
 
     model.load_pretrained(args.model_checkpoint)
 
