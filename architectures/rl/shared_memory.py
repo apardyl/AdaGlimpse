@@ -94,6 +94,7 @@ class SharedMemory:
         self._shared["images"][:b].copy_(batch['image'])
         self.current_glimpse = 0
         self._copy_target_tensor_fn(self._shared["target"], batch)
+        self._shared["mask"][:b].fill_(1)
 
     def add_glimpse(self, new_patches: Tensor, new_coords: Tensor):
         b, g = self.current_batch_size, self.current_glimpse
