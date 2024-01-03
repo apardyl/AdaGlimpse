@@ -359,13 +359,17 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         with_loss_and_grad = mode == 'train' and is_done
         with nullcontext() if self.autograd_backbone and with_loss_and_grad else torch.no_grad():
             step = state.current_glimpse
-            latent, pos_embed = self.mae.forward_encoder(state.patches, coords=state.coords)
+            coords = state.coords
+            latent, pos_embed = self.mae.forward_encoder(state.patches, coords=coords)
 
             out, loss, score = self._forward_task(state, latent, is_done, with_loss_and_grad, mode)
 
             observation = torch.zeros(latent.shape[0], state.mask.shape[1] + 1,
                                       latent.shape[-1], device=latent.device, dtype=latent.dtype)
             observation[:, :latent.shape[1]].copy_(latent)
+            state_coords = torch.zeros(coords.shape[0], state.mask.shape[1], coords.shape[-1],
+                                       device=coords.device, dtype=coords.dtype)
+            state_coords[:, :coords.shape[1]].copy_(coords)
 
             if self.add_pos_embed:
                 observation[:, 1:latent.shape[1]].add_(pos_embed)
@@ -376,7 +380,8 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                                                                           dtype=torch.bool, device=latent.device)
         next_state = TensorDict({
             'observation': observation,
-            'mask': state.mask,
+            'mask': state.mask.clone(),
+            'coords': state_coords,
             'step': torch.ones(size=(latent.shape[0], 1), dtype=torch.long, device=latent.device) * step,
             'done': done,
             'terminated': done,
@@ -514,7 +519,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
 
             if not is_done and self.glimpse_size_penalty > 0.:
                 state['next', 'reward'] = (state['next', 'reward'] -
-                                           state['next', 'action'][:, -1] * self.glimpse_size_penalty)
+                                           state['next', 'action'][:, -1:] * self.glimpse_size_penalty)
 
             self.replay_buffer.extend(state)
 

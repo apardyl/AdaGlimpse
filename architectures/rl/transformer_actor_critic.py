@@ -30,7 +30,7 @@ class ActorNet(nn.Module):
             NormalParamExtractor(scale_mapping="biased_softplus_0.5"),
         )
 
-    def forward(self, observation, mask):
+    def forward(self, observation, mask, coords):
         observation = self.rl_embed(observation)
 
         for block in self.blocks:
@@ -65,7 +65,7 @@ class QValueNet(nn.Module):
             nn.Linear(hidden_dim, 1),
         )
 
-    def forward(self, observation, mask, action):
+    def forward(self, observation, mask, coords, action):
         observation = self.rl_embed(observation)
 
         for block in self.blocks:
@@ -86,7 +86,7 @@ class TransformerActorCritic(nn.Module):
                     action_dim=action_dim, norm_layer=norm_layer, embed_dim=embed_dim, hidden_dim=hidden_dim,
                     num_heads=num_heads, mlp_ratio=mlp_ratio, depth=depth
                 ),
-                in_keys=["observation", "mask"],
+                in_keys=["observation", "mask", "coords"],
                 out_keys=["loc", "scale"]
             ),
             spec=BoundedTensorSpec(
@@ -109,5 +109,5 @@ class TransformerActorCritic(nn.Module):
                 action_dim=action_dim, norm_layer=norm_layer, embed_dim=embed_dim, hidden_dim=hidden_dim,
                 num_heads=num_heads, mlp_ratio=mlp_ratio, depth=depth
             ),
-            in_keys=["observation", "mask", "action"],
+            in_keys=["observation", "mask", "coords", "action"],
         )
