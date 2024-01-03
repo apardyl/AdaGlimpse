@@ -653,13 +653,13 @@ class ClassificationRlMAE(BaseRlMAE):
         if is_done:
             self.log_metric(mode, 'accuracy', out.detach(), target, on_epoch=True, batch_size=latent.shape[0])
 
-        if not is_done:
-            score = (torch.argmax(out, dim=-1) == target) * 1. / self.num_glimpses
-        else:
-            score = (torch.argmax(out, dim=-1) == target) * 7. - 5.
+        # if not is_done:
+        #     score = (torch.argmax(out, dim=-1) == target) * 1. / self.num_glimpses
+        # else:
+        #     score = (torch.argmax(out, dim=-1) == target) * 7. - 5.
 
-        # score = torch.nn.functional.softmax(out, dim=-1)
-        # score = score[torch.arange(score.shape[0]), target]
-        # score = score * 10
+        score = torch.nn.functional.softmax(out, dim=-1)
+        score = score[torch.arange(score.shape[0]), target]
+        score = score * 10
 
         return out, None, score.reshape(score.shape[0], 1)
