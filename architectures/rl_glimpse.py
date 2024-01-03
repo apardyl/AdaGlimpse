@@ -512,7 +512,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
             else:
                 state['next', 'reward'] = state['next', 'score'] - state['score']
 
-            if self.glimpse_size_penalty > 0.:
+            if not is_done and self.glimpse_size_penalty > 0.:
                 state['next', 'reward'] = (state['next', 'reward'] -
                                            state['next', 'action'][:, -1] * self.glimpse_size_penalty)
 
