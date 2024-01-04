@@ -68,7 +68,8 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         # noinspection PyTypeChecker
         self.mae: MaskedAutoencoderViT = torch.compile(self.mae, mode='reduce-overhead')
 
-        self.actor_critic = TransformerActorCritic(embed_dim=self.mae.patch_embed.embed_dim)
+        self.actor_critic = TransformerActorCritic(embed_dim=self.mae.patch_embed.embed_dim,
+                                                   patch_num=self.num_glimpses * (self.glimpse_grid_size ** 2))
 
         if pretrained_mae_path is not None:
             self.load_pretrained_elastic(pretrained_mae_path)
@@ -88,7 +89,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         self.engine: Optional[BaseGlimpseEngine] = None
         self.replay_buffer = None
         self.game_state = [None] * max(self.parallel_games, 1)
-        self.add_pos_embed = True
+        self.add_pos_embed = False
 
         self.save_hyperparameters(ignore=['datamodule'])
         self._user_forward_hook = None
@@ -129,7 +130,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         parser.add_argument('--init-random-batches',
                             help='number of random action batches on training start',
                             type=int,
-                            default=10000)
+                            default=100)
         parser.add_argument('--freeze-backbone-epochs',
                             help='number of rl training epochs before starting to train the backbone',
                             type=int,
@@ -367,8 +368,8 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
             observation = torch.zeros(latent.shape[0], state.mask.shape[1] + 1,
                                       latent.shape[-1], device=latent.device, dtype=latent.dtype)
             observation[:, :latent.shape[1]].copy_(latent)
-            state_coords = torch.zeros(coords.shape[0], state.mask.shape[1], coords.shape[-1],
-                                       device=coords.device, dtype=coords.dtype)
+            state_coords = torch.ones(coords.shape[0], state.mask.shape[1], coords.shape[-1],
+                                      device=coords.device, dtype=coords.dtype) * -1
             state_coords[:, :coords.shape[1]].copy_(coords)
 
             if self.add_pos_embed:
@@ -525,7 +526,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
 
         optimizer_actor, optimizer_critic, optimizer_alpha, optimizer_backbone = self.optimizers()
 
-        if self.is_rl_training_enabled and len(self.replay_buffer) >= self.replay_buffer_size:
+        if self.is_rl_training_enabled and len(self.replay_buffer) >= self.rl_batch_size:
             self.rl_training_step(optimizer_actor, optimizer_critic, optimizer_alpha, env_state.current_batch_size)
 
         if self.is_backbone_training_enabled and is_done:

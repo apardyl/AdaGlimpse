@@ -11,81 +11,87 @@ from architectures.mae_utils import Layer_scale_init_Block
 
 
 class ActorNet(nn.Module):
-    def __init__(self, action_dim, norm_layer, embed_dim, hidden_dim,
-                 num_heads, mlp_ratio, depth):
+    def __init__(self, action_dim, norm_layer, hidden_dim, observation_net, glimpse_net):
         super().__init__()
 
-        self.rl_embed = nn.Linear(embed_dim, hidden_dim, bias=True)
-
-        self.blocks = nn.ModuleList([
-            Layer_scale_init_Block(hidden_dim, num_heads, mlp_ratio, qkv_bias=True, qk_scale=None,
-                                   norm_layer=norm_layer)
-            for _ in range(depth)])
+        self.observation_net = observation_net
+        self.glimpse_net = glimpse_net
 
         self.head = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
             norm_layer(hidden_dim),
-            nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, 2 * action_dim),
             NormalParamExtractor(scale_mapping="biased_softplus_0.5"),
         )
 
     def forward(self, observation, mask, coords):
-        observation = self.rl_embed(observation)
-
-        for block in self.blocks:
-            observation = block(observation, pad_mask=mask)
-
-        observation = observation[:, 0]
-        observation = self.head(observation)
-        return observation
+        observation = self.observation_net(observation.mean(dim=1))
+        coords = self.glimpse_net(coords.reshape(coords.shape[0], -1))
+        return self.head(torch.cat([observation, coords], dim=-1))
 
 
 class QValueNet(nn.Module):
-    def __init__(self, action_dim, norm_layer, embed_dim, hidden_dim,
-                 num_heads, mlp_ratio, depth):
+    def __init__(self, action_dim, norm_layer, hidden_dim, observation_net, glimpse_net):
         super().__init__()
 
-        self.rl_embed = nn.Linear(embed_dim, hidden_dim, bias=True)
-
-        self.blocks = nn.ModuleList([
-            Layer_scale_init_Block(hidden_dim, num_heads, mlp_ratio, qkv_bias=True, qk_scale=None,
-                                   norm_layer=norm_layer)
-            for _ in range(depth)])
+        self.observation_net = observation_net
+        self.glimpse_net = glimpse_net
 
         self.action_net = nn.Sequential(
-            nn.Linear(action_dim, hidden_dim // 2),
+            nn.Linear(action_dim, hidden_dim),
+            norm_layer(hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            norm_layer(hidden_dim),
             nn.ReLU()
         )
 
-        self.value_net = nn.Sequential(
-            norm_layer(3 * hidden_dim // 2),
-            nn.Linear(3 * hidden_dim // 2, hidden_dim),
+        self.head = nn.Sequential(
+            nn.Linear(hidden_dim * 3, hidden_dim),
+            norm_layer(hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, 1),
         )
 
     def forward(self, observation, mask, coords, action):
-        observation = self.rl_embed(observation)
-
-        for block in self.blocks:
-            observation = block(observation, pad_mask=mask)
-        observation = observation[:, 0]
+        observation = self.observation_net(observation.mean(dim=1))
+        coords = self.glimpse_net(coords.reshape(coords.shape[0], -1))
         action = self.action_net(action)
-        return self.value_net(torch.cat([observation, action], dim=-1))
+        return self.head(torch.cat([observation, coords, action], dim=-1))
 
 
 class TransformerActorCritic(nn.Module):
-    def __init__(self, action_dim=3, norm_layer=partial(nn.LayerNorm, eps=1e-6), embed_dim=768, hidden_dim=192,
-                 num_heads=12, mlp_ratio=4, depth=2):
+    def __init__(self, action_dim=3, norm_layer=partial(nn.LayerNorm, eps=1e-6), embed_dim=768, hidden_dim=256,
+                 patch_num=14 * 4):
         super().__init__()
+
+        self.observation_net = nn.Sequential(
+            nn.Linear(embed_dim, hidden_dim),
+            norm_layer(hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            norm_layer(hidden_dim),
+            nn.ReLU()
+        )
+
+        self.glimpse_net = nn.Sequential(
+            nn.Linear(patch_num * 4, hidden_dim),
+            norm_layer(hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            norm_layer(hidden_dim),
+            nn.ReLU()
+        )
+
+        self.actor_net = ActorNet(
+            action_dim=action_dim, norm_layer=norm_layer, hidden_dim=hidden_dim,
+            observation_net=self.observation_net, glimpse_net=self.glimpse_net
+        )
 
         self.policy_module = ProbabilisticActor(
             module=TensorDictModule(
-                ActorNet(
-                    action_dim=action_dim, norm_layer=norm_layer, embed_dim=embed_dim, hidden_dim=hidden_dim,
-                    num_heads=num_heads, mlp_ratio=mlp_ratio, depth=depth
-                ),
+                module=self.actor_net,
                 in_keys=["observation", "mask", "coords"],
                 out_keys=["loc", "scale"]
             ),
@@ -104,10 +110,12 @@ class TransformerActorCritic(nn.Module):
             default_interaction_type=InteractionType.RANDOM
         )
 
+        self.qvalue_net = QValueNet(
+            action_dim=action_dim, norm_layer=norm_layer, hidden_dim=hidden_dim,
+            observation_net=self.observation_net, glimpse_net=self.glimpse_net
+        )
+
         self.qvalue_module = ValueOperator(
-            module=QValueNet(
-                action_dim=action_dim, norm_layer=norm_layer, embed_dim=embed_dim, hidden_dim=hidden_dim,
-                num_heads=num_heads, mlp_ratio=mlp_ratio, depth=depth
-            ),
+            module=self.qvalue_net,
             in_keys=["observation", "mask", "coords", "action"],
         )
