@@ -45,34 +45,35 @@ class InteractiveStatelessSampler:
         new_crops = new_crops.to(torch.long)
         return new_crops
 
-    def _crop_and_resize(self, new_crops: torch.Tensor, images_cpu):
-        patches = []
-        coords = []
+    def _crop_and_resize(self, new_crops: torch.Tensor, images_cpu: torch.Tensor, is_done: torch.Tensor):
+        patches = torch.zeros(
+            (new_crops.shape[0], new_crops.shape[1], 3, self._native_patch_size[0], self._native_patch_size[1]))
+        coords = torch.ones((new_crops.shape[0], new_crops.shape[1], 4), dtype=torch.long) * -1
+        masks = torch.ones((new_crops.shape[0], new_crops.shape[1], 1))
 
         for b_idx in range(new_crops.shape[0]):  # batch size
+            env_done = is_done[b_idx]
             for p_idx in range(new_crops.shape[1]):  # crops
-                y, x, s = new_crops[b_idx, p_idx]
-                patch = images_cpu[b_idx, :, y:y + s, x:x + s]
+                if not env_done:
+                    y, x, s = new_crops[b_idx, p_idx]
+                    patch = images_cpu[b_idx, :, y:y + s, x:x + s]
 
-                if patch.shape[-1] != self._native_patch_size[0] or patch.shape[-2] != self._native_patch_size[1]:
-                    patch = resize(
-                        patch, list(self._native_patch_size),
-                        antialias=False,
-                        interpolation=InterpolationMode.BILINEAR
-                    )
+                    if patch.shape[-1] != self._native_patch_size[0] or patch.shape[-2] != self._native_patch_size[1]:
+                        patch = resize(
+                            patch, list(self._native_patch_size),
+                            antialias=False,
+                            interpolation=InterpolationMode.BILINEAR
+                        )
+                    patches[b_idx, p_idx] = patch
+                    coords[b_idx, p_idx] = torch.tensor([y, x, y + s, x + s], dtype=torch.long)
+                    masks[b_idx, p_idx] = 0
 
-                patches.append(patch)
-                coord = torch.tensor([y, x, y + s, x + s], dtype=torch.long)
-                coords.append(coord)
-
-        patches = torch.stack(patches).reshape(
-            (new_crops.shape[0], new_crops.shape[1], 3, self._native_patch_size[0], self._native_patch_size[1]))
-        coords = torch.stack(coords).reshape((new_crops.shape[0], new_crops.shape[1], 4))
-        return patches, coords
+        return patches, coords, masks
 
     @torch.no_grad()
     def sample(self, images_cpu: Tensor, shared_memory: SharedMemory):
         new_crops: Tensor = shared_memory.action.clone().cpu()
+        is_done: Tensor = shared_memory.done.clone().cpu()
         new_crops = self._calculate_crops(new_crops, images_cpu.shape)
-        patches, coords = self._crop_and_resize(new_crops, images_cpu)
-        shared_memory.add_glimpse(patches, coords)
+        patches, coords, masks = self._crop_and_resize(new_crops, images_cpu, is_done)
+        shared_memory.add_glimpse(patches, coords, masks)

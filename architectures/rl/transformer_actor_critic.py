@@ -30,7 +30,7 @@ class ObservationNet(nn.Module):
                 nn.ReLU(),
                 nn.Linear(hidden_dim, hidden_dim),
                 norm_layer(hidden_dim),
-                nn.ReLU()
+                nn.ReLU(),
             )
         else:
             self.net = nn.Sequential(
@@ -59,7 +59,7 @@ class ActorNet(nn.Module):
         self.glimpse_net = glimpse_net
 
         self.head = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(hidden_dim * 2, hidden_dim),
             norm_layer(hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
@@ -70,10 +70,10 @@ class ActorNet(nn.Module):
         )
 
     def forward(self, observation, mask, coords):
-        # observation = self.observation_net(observation, mask)
+        observation = self.observation_net(observation, mask)
         coords = self.glimpse_net(coords.reshape(coords.shape[0], -1))
-        # observation = torch.cat([observation, coords], dim=-1)
-        return self.head(coords)
+        observation = torch.cat([observation, coords], dim=-1)
+        return self.head(observation)
 
 
 class QValueNet(nn.Module):
@@ -93,7 +93,7 @@ class QValueNet(nn.Module):
         )
 
         self.head = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.Linear(hidden_dim * 3, hidden_dim),
             norm_layer(hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
@@ -103,10 +103,10 @@ class QValueNet(nn.Module):
         )
 
     def forward(self, observation, mask, coords, action):
-        # observation = self.observation_net(observation, mask)
+        observation = self.observation_net(observation, mask)
         coords = self.glimpse_net(coords.reshape(coords.shape[0], -1))
         action = self.action_net(action)
-        observation = torch.cat([coords, action], dim=-1)
+        observation = torch.cat([observation, coords, action], dim=-1)
         return self.head(observation)
 
 

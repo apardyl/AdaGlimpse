@@ -35,7 +35,8 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                  max_glimpse_size_ratio=1.0, glimpse_grid_size=2, rl_iters_per_step=1, epochs=100,
                  init_random_batches=100, freeze_backbone_epochs=1, rl_batch_size=64, replay_buffer_size=10000,
                  lr=3e-4, backbone_lr=1e-5, parallel_games=2, backbone_training_type: str = 'alternating',
-                 rl_loss_function: str = 'l2', glimpse_size_penalty: float = 0., simple_reward=False, **_) -> None:
+                 rl_loss_function: str = 'l2', glimpse_size_penalty: float = 0., simple_reward=False,
+                 early_stop_threshold=None, **_) -> None:
         super().__init__()
 
         self.steps_per_epoch = None
@@ -52,6 +53,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         self.backbone_training_type = backbone_training_type
         self.glimpse_size_penalty = glimpse_size_penalty
         self.simple_reward = simple_reward
+        self.early_stop_threshold = early_stop_threshold
 
         self.replay_buffer_size = replay_buffer_size
         self.parallel_games = parallel_games
@@ -173,6 +175,10 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                             type=bool,
                             default=False,
                             action=argparse.BooleanOptionalAction)
+        parser.add_argument('--early-stop-threshold',
+                            help='early stop score threshold',
+                            type=float,
+                            default=None)
         return parent_parser
 
     def configure_optimizers(self):
@@ -356,19 +362,20 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         score for RL training, as well as logging any task-specific metrics."""
         raise NotImplementedError()
 
-    def forward_game_state(self, state: SharedMemory, is_done: bool, mode: str):
+    def forward_game_state(self, env_state: SharedMemory, mode: str):
+        is_done = env_state.is_done
         with_loss_and_grad = mode == 'train' and is_done
         with nullcontext() if self.autograd_backbone and with_loss_and_grad else torch.no_grad():
-            step = state.current_glimpse
-            coords = state.coords
-            latent, pos_embed = self.mae.forward_encoder(state.patches, coords=coords)
+            step = env_state.current_glimpse
+            coords = env_state.coords
+            latent, pos_embed = self.mae.forward_encoder(env_state.patches, coords=coords)
 
-            out, loss, score = self._forward_task(state, latent, is_done, with_loss_and_grad, mode)
+            out, loss, score = self._forward_task(env_state, latent, is_done, with_loss_and_grad, mode)
 
-            observation = torch.zeros(latent.shape[0], state.mask.shape[1] + 1,
+            observation = torch.zeros(latent.shape[0], env_state.mask.shape[1] + 1,
                                       latent.shape[-1], device=latent.device, dtype=latent.dtype)
             observation[:, :latent.shape[1]].copy_(latent)
-            state_coords = torch.ones(coords.shape[0], state.mask.shape[1], coords.shape[-1],
+            state_coords = torch.ones(coords.shape[0], env_state.mask.shape[1], coords.shape[-1],
                                       device=coords.device, dtype=coords.dtype) * -1
             state_coords[:, :coords.shape[1]].copy_(coords)
 
@@ -377,11 +384,14 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
 
             observation.detach_()
 
-        done = (torch.ones if step >= self.num_glimpses else torch.zeros)(size=(latent.shape[0], 1),
-                                                                          dtype=torch.bool, device=latent.device)
+            if not is_done and self.early_stop_threshold is not None:
+                env_state.done = torch.logical_or(env_state.done, torch.ge(score, self.early_stop_threshold))
+
+        done = env_state.done.clone()
+
         next_state = TensorDict({
             'observation': observation,
-            'mask': state.mask.clone(),
+            'mask': env_state.mask.clone(),
             'coords': state_coords,
             'step': torch.ones(size=(latent.shape[0], 1), dtype=torch.long, device=latent.device) * step,
             'done': done,
@@ -389,7 +399,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
             'score': score,
         }, batch_size=observation.shape[0])
 
-        self.call_user_forward_hook(state, out, score)
+        self.call_user_forward_hook(env_state, out, score)
 
         return next_state, step, loss
 
@@ -482,17 +492,18 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         env_state: SharedMemory
         game_idx: int
         env_state, game_idx = batch
-        is_done = env_state.is_done
 
-        next_state, step, backbone_loss = self.forward_game_state(env_state, is_done, mode='train')
-        if not is_done:
+        next_state, step, backbone_loss = self.forward_game_state(env_state, mode='train')
+        if not env_state.is_done:
             # calculate action and submit it.
             if self.real_train_step < self.init_random_batches:
                 next_action = self.random_action(next_state.batch_size[0]).to(self.device)
             else:
                 next_action = self.forward_action(next_state, exploration_type=ExplorationType.RANDOM)
             next_state['action'] = next_action
-            env_state.set_action(next_action.detach())
+            env_state.action = next_action.detach()
+
+        is_done = env_state.is_done
 
         if self.is_rl_training_enabled:
             next_state = next_state.detach()
@@ -507,6 +518,9 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
             assert state is not None
 
             state['next'] = next_state
+
+            active_mask = torch.logical_not(torch.logical_and(state['done'], state['next', 'done'])).squeeze(1)
+
             if not is_done:
                 self.game_state[game_idx] = next_state
             else:
@@ -522,7 +536,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                 state['next', 'reward'] = (state['next', 'reward'] -
                                            state['next', 'action'][:, -1:] * self.glimpse_size_penalty)
 
-            self.replay_buffer.extend(state)
+            self.replay_buffer.extend(state[active_mask])
 
         optimizer_actor, optimizer_critic, optimizer_alpha, optimizer_backbone = self.optimizers()
 
@@ -536,13 +550,12 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         env_state: SharedMemory
         game_idx: int
         env_state, game_idx = batch
-        is_done = env_state.is_done
 
-        next_state, step, backbone_loss = self.forward_game_state(env_state, is_done, mode=mode)
+        next_state, step, backbone_loss = self.forward_game_state(env_state, mode=mode)
 
-        if not is_done:
+        if not env_state.is_done:
             next_action = self.forward_action(next_state, exploration_type=ExplorationType.MEAN)
-            env_state.set_action(next_action.detach())
+            env_state.action = next_action.detach()
 
     def validation_step(self, batch, batch_idx):
         self.inference_step(batch, batch_idx, 'val')

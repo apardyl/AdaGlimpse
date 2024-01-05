@@ -13,7 +13,6 @@ from torch import Tensor
 from torchvision.transforms.v2.functional import resize
 from tqdm import tqdm
 
-from architectures.base import AutoconfigLightningModule
 from architectures.rl.shared_memory import SharedMemory
 from architectures.rl_glimpse import BaseRlMAE
 from architectures.utils import RevNormalizer
@@ -58,10 +57,13 @@ class RLUserHook:
         self.current_out = []
         self.current_scores = []
         self.targets = []
+        self.done = []
+        self.current_done = []
 
     def __call__(self, env_state: SharedMemory, out, score):
         self.current_out.append(out.clone().detach().cpu())
         self.current_scores.append(score.clone().detach().cpu())
+        self.current_done.append(env_state.done.clone().detach().cpu())
 
         if env_state.is_done:
             self.images.append(env_state.images.clone().detach().cpu())
@@ -72,6 +74,8 @@ class RLUserHook:
             self.scores.append(torch.stack(self.current_scores, dim=1))
             self.current_scores = []
             self.targets.append(env_state.target.clone().detach().cpu())
+            self.done.append(torch.stack(self.current_done, dim=1))
+            self.current_done = []
 
     def compute(self):
         return {
@@ -80,7 +84,8 @@ class RLUserHook:
             "scores": torch.cat(self.scores, dim=0),
             "coords": torch.cat(self.coords, dim=0),
             "patches": torch.cat(self.patches, dim=0),
-            "targets": torch.cat(self.targets, dim=0)
+            "targets": torch.cat(self.targets, dim=0),
+            "done": torch.cat(self.done, dim=0)
         }
 
 
@@ -217,7 +222,7 @@ def selection_map(mask, patch_size):
 
 
 def visualize_one(model: BaseRlMAE, image: Tensor, out: Tensor, coords: Tensor, patches: Tensor, scores: Tensor,
-                  target: Tensor, save_path: str, rev_normalizer) -> None:
+                  target: Tensor, done: Tensor, save_path: str, rev_normalizer) -> None:
     num_glimpses = model.num_glimpses
     patches_per_glimpse = coords.shape[0] // num_glimpses
     assert patches_per_glimpse * num_glimpses == coords.shape[0]  # assert if divisible by num_glimpses
@@ -252,6 +257,8 @@ def visualize_one(model: BaseRlMAE, image: Tensor, out: Tensor, coords: Tensor, 
                      for idx in range(num_glimpses)]
 
     for glimpse_idx in range(model.num_glimpses):
+        if done[glimpse_idx]:
+            continue
         start_idx = glimpse_idx * patches_per_glimpse
         end_idx = start_idx + patches_per_glimpse
 
@@ -275,10 +282,10 @@ def visualize(visualization_path, model):
     images = rev_normalizer(data["images"]).to(torch.uint8)
     patches = rev_normalizer(data["patches"]).to(torch.uint8)
 
-    for idx, (img, out, coord, patch, score, target) in enumerate(tqdm(
-            zip(images, data["out"], data["coords"], patches, data['scores'], data['targets']),
+    for idx, (img, out, coord, patch, score, target, done) in enumerate(tqdm(
+            zip(images, data["out"], data["coords"], patches, data['scores'], data['targets'], data['done']),
             total=images.shape[0])):
-        visualize_one(model, img, out, coord, patch, score, target,
+        visualize_one(model, img, out, coord, patch, score, target, done,
                       os.path.join(visualization_path, f"{idx}.png"), rev_normalizer)
 
 

@@ -28,7 +28,8 @@ class SharedMemory:
             "coords": torch.zeros((batch_size, self._max_patches, 4)),
             "mask": torch.ones((batch_size, self._max_patches, 1)),
             "action": torch.zeros((batch_size, 3)),
-            "target": create_target_tensor_fn(batch_size)
+            "target": create_target_tensor_fn(batch_size),
+            "done": torch.zeros((batch_size, 1), dtype=torch.bool)
         }, batch_size=(), device=device)
 
         self._state = Value(_SharedMemStruct, lock=True)
@@ -64,9 +65,21 @@ class SharedMemory:
     def action(self):
         return self._shared['action'][:self.current_batch_size]
 
+    @action.setter
+    def action(self, value: Tensor):
+        self._shared["action"][:self.current_batch_size].copy_(value)
+
     @property
     def target(self):
         return self._shared['target'][:self.current_batch_size]
+
+    @property
+    def done(self):
+        return self._shared['done'][:self.current_batch_size]
+
+    @done.setter
+    def done(self, value: Tensor):
+        self._shared["done"][:self.current_batch_size].copy_(value)
 
     @property
     def current_glimpse(self):
@@ -86,7 +99,7 @@ class SharedMemory:
 
     @property
     def is_done(self):
-        return self.current_glimpse >= self._max_glimpses
+        return self.current_glimpse >= self._max_glimpses or torch.all(self.done)
 
     def set_batch(self, batch: Dict[str, Tensor]):
         b = batch['image'].shape[0]
@@ -95,8 +108,9 @@ class SharedMemory:
         self.current_glimpse = 0
         self._copy_target_tensor_fn(self._shared["target"], batch)
         self._shared["mask"][:b].fill_(1)
+        self._shared["done"][:b].fill_(False)
 
-    def add_glimpse(self, new_patches: Tensor, new_coords: Tensor):
+    def add_glimpse(self, new_patches: Tensor, new_coords: Tensor, new_masks: Tensor):
         b, g = self.current_batch_size, self.current_glimpse
         assert new_patches.shape[0] == b
         assert new_patches.shape[1] == self._patches_per_glimpse
@@ -106,9 +120,9 @@ class SharedMemory:
 
         self._shared["patches"][:b, start: end].copy_(new_patches)
         self._shared["coords"][:b, start: end].copy_(new_coords)
-        self._shared["mask"][:b, start: end].fill_(0)
+        self._shared["mask"][:b, start: end].copy_(new_masks)
 
         self.current_glimpse = g + 1
 
-    def set_action(self, action: Tensor):
-        self._shared["action"][:self.current_batch_size].copy_(action)
+        if self.current_glimpse >= self._max_glimpses:
+            self._shared["done"][:b].fill_(True)
