@@ -1,5 +1,3 @@
-from typing import Tuple
-
 import numpy as np
 from timm.data.mixup import mixup_target
 from torch import Tensor
@@ -15,8 +13,8 @@ class InPlacePatchMix:
         self.num_classes = num_classes
 
     def __call__(self, shared_memory: SharedMemory) -> Tensor:
-        patches: Tensor = shared_memory.patches
-        coords: Tensor = shared_memory.coords
+        patches: Tensor = shared_memory.current_patches
+        coords: Tensor = shared_memory.current_coords
         targets: Tensor = shared_memory.target
 
         assert patches.shape[0] % 2 == 0, 'Batch size should be even when using this'

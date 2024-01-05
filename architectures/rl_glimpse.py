@@ -176,7 +176,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                             default=False,
                             action=argparse.BooleanOptionalAction)
         parser.add_argument('--early-stop-threshold',
-                            help='early stop score threshold',
+                            help='exploration early stop score threshold',
                             type=float,
                             default=None)
         return parent_parser
@@ -367,17 +367,15 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         with_loss_and_grad = mode == 'train' and is_done
         with nullcontext() if self.autograd_backbone and with_loss_and_grad else torch.no_grad():
             step = env_state.current_glimpse
-            coords = env_state.coords
-            latent, pos_embed = self.mae.forward_encoder(env_state.patches, coords=coords)
+            latent, pos_embed = self.mae.forward_encoder(env_state.current_patches, coords=env_state.current_coords,
+                                                         pad_mask=env_state.current_mask)
 
             out, loss, score = self._forward_task(env_state, latent, is_done, with_loss_and_grad, mode)
 
-            observation = torch.zeros(latent.shape[0], env_state.mask.shape[1] + 1,
+            all_coords = env_state.all_coords
+            observation = torch.zeros(latent.shape[0], all_coords.shape[1] + 1,
                                       latent.shape[-1], device=latent.device, dtype=latent.dtype)
             observation[:, :latent.shape[1]].copy_(latent)
-            state_coords = torch.ones(coords.shape[0], env_state.mask.shape[1], coords.shape[-1],
-                                      device=coords.device, dtype=coords.dtype) * -1
-            state_coords[:, :coords.shape[1]].copy_(coords)
 
             if self.add_pos_embed:
                 observation[:, 1:latent.shape[1]].add_(pos_embed)
@@ -391,8 +389,8 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
 
         next_state = TensorDict({
             'observation': observation,
-            'mask': env_state.mask.clone(),
-            'coords': state_coords,
+            'mask': env_state.all_mask,
+            'coords': all_coords,
             'step': torch.ones(size=(latent.shape[0], 1), dtype=torch.long, device=latent.device) * step,
             'done': done,
             'terminated': done,
@@ -655,10 +653,11 @@ class ClassificationRlMAE(BaseRlMAE):
     def _create_target_tensor_fn(batch_size: int):
         return torch.zeros(batch_size, dtype=torch.long)
 
-    def backbone_training_step(self, optimizer_backbone, backbone_loss, env_state):
+    def backbone_training_step(self, optimizer_backbone, backbone_loss, env_state: SharedMemory):
         target = self.patch_mix(env_state)
 
-        latent, pos_embed = self.mae.forward_encoder(env_state.patches, coords=env_state.coords)
+        latent, pos_embed = self.mae.forward_encoder(env_state.current_patches, coords=env_state.current_coords,
+                                                     pad_mask=env_state.current_mask)
         out = self.mae.forward_head(latent)
         loss = self.loss_fn(out, target)
 

@@ -44,21 +44,34 @@ class SharedMemory:
         return s.current_batch_size, s.current_glimpse
 
     @property
-    def patches(self):
+    def current_patches(self):
         current_batch_size, current_glimpse = self._get_state()
         return self._shared["patches"][:current_batch_size, :current_glimpse * self._patches_per_glimpse]
 
     @property
-    def coords(self):
+    def all_patches(self):
+        return self._shared["patches"][:self.current_batch_size]
+
+    @property
+    def current_coords(self):
         current_batch_size, current_glimpse = self._get_state()
         return self._shared["coords"][:current_batch_size, :current_glimpse * self._patches_per_glimpse]
+
+    @property
+    def all_coords(self):
+        return self._shared["coords"][:self.current_batch_size]
 
     @property
     def images(self):
         return self._shared['images'][:self.current_batch_size]
 
     @property
-    def mask(self):
+    def current_mask(self):
+        current_batch_size, current_glimpse = self._get_state()
+        return self._shared["mask"][:current_batch_size, :current_glimpse * self._patches_per_glimpse]
+
+    @property
+    def all_mask(self):
         return self._shared['mask'][:self.current_batch_size]
 
     @property

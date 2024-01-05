@@ -67,8 +67,8 @@ class RLUserHook:
 
         if env_state.is_done:
             self.images.append(env_state.images.clone().detach().cpu())
-            self.coords.append(env_state.coords.clone().detach().cpu())
-            self.patches.append(env_state.patches.clone().detach().cpu())
+            self.coords.append(env_state.current_coords.clone().detach().cpu())
+            self.patches.append(env_state.current_patches.clone().detach().cpu())
             self.out.append(torch.stack(self.current_out, dim=1))
             self.current_out = []
             self.scores.append(torch.stack(self.current_scores, dim=1))
