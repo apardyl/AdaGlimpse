@@ -389,8 +389,8 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
 
         next_state = TensorDict({
             'observation': observation,
-            'mask': env_state.all_mask,
-            'coords': all_coords,
+            'mask': env_state.all_mask.clone(),
+            'coords': all_coords.clone(),
             'step': torch.ones(size=(latent.shape[0], 1), dtype=torch.long, device=latent.device) * step,
             'done': done,
             'terminated': done,
