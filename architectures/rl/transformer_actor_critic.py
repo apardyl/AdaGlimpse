@@ -16,7 +16,7 @@ class ObservationNet(nn.Module):
 
         self.rl_embed = nn.Linear(embed_dim, hidden_dim)
 
-        self.depth = 0
+        self.depth = 2
 
         self.blocks = nn.ModuleList([
             Layer_scale_init_Block(hidden_dim, num_heads=12, mlp_ratio=4, qkv_bias=True, qk_scale=None,
@@ -40,13 +40,15 @@ class ObservationNet(nn.Module):
             )
 
     def forward(self, observation, mask):
+        observation = self.rl_embed(observation)
+
         for block in self.blocks:
             observation = block(observation, pad_mask=mask)
 
         # masked global pooling.
         mask = torch.cat([torch.zeros(mask.shape[0], 1, 1, dtype=mask.dtype, device=mask.device), mask], dim=1)
         mask = 1 - mask
-        observation = (observation * mask).mean(dim=1) / mask.sum(dim=1)
+        observation = (observation * mask).sum(dim=1) / mask.sum(dim=1)
 
         return self.net(observation)
 

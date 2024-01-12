@@ -83,6 +83,7 @@ class MaskedAutoencoderViT(nn.Module):
         self.head = nn.Linear(embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
         self.initialize_weights()
+        self.aux_latent = None
 
     def initialize_weights(self):
         # initialization
@@ -144,7 +145,7 @@ class MaskedAutoencoderViT(nn.Module):
         imgs = x.reshape(shape=(x.shape[0], c, h * p, w * p))
         return imgs
 
-    def forward_encoder(self, x, patch_indices=None, pad_mask=None, coords=None):
+    def forward_encoder(self, x, patch_indices=None, pad_mask=None, coords=None, aux_latent_layer=None):
         # embed patches
         x = self.patch_embed(x)
         N, L, D = x.shape  # batch, length, dim
@@ -170,7 +171,9 @@ class MaskedAutoencoderViT(nn.Module):
         x = torch.cat((cls_tokens, x), dim=1)
 
         # apply Transformer blocks
-        for blk in self.blocks:
+        for idx, blk in enumerate(self.blocks):
+            if aux_latent_layer is not None and idx == aux_latent_layer:
+                self.aux_latent = x
             x = blk(x, pad_mask)
         x = self.norm(x)
 
@@ -260,7 +263,7 @@ class MaskedAutoencoderViT(nn.Module):
         return torch.stack([block.attn.attn_scores for block in self.blocks], dim=0)
 
     @torch.no_grad()
-    def encoder_attention_rollout(self, head_fusion="mean", discard_ratio=0.9):
+    def encoder_attention_rollout(self, head_fusion="mean", discard_ratio=0.5):
         attentions = self.encoder_attn_scores
         result = torch.eye(attentions.shape[3], device=attentions.device).unsqueeze(0).repeat(
             (attentions.shape[1], 1, 1))

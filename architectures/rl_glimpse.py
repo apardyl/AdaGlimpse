@@ -36,7 +36,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                  init_random_batches=100, freeze_backbone_epochs=1, rl_batch_size=64, replay_buffer_size=10000,
                  lr=3e-4, backbone_lr=1e-5, parallel_games=2, backbone_training_type: str = 'alternating',
                  rl_loss_function: str = 'l2', glimpse_size_penalty: float = 0., simple_reward=False,
-                 early_stop_threshold=None, **_) -> None:
+                 early_stop_threshold=None, extract_latent_layer=None, **_) -> None:
         super().__init__()
 
         self.steps_per_epoch = None
@@ -54,6 +54,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         self.glimpse_size_penalty = glimpse_size_penalty
         self.simple_reward = simple_reward
         self.early_stop_threshold = early_stop_threshold
+        self.extract_latent_layer = extract_latent_layer
 
         self.replay_buffer_size = replay_buffer_size
         self.parallel_games = parallel_games
@@ -178,6 +179,10 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         parser.add_argument('--early-stop-threshold',
                             help='exploration early stop score threshold',
                             type=float,
+                            default=None)
+        parser.add_argument('--extract-latent-layer',
+                            help='number of encoder layer to extract latent for rl from (default = last)',
+                            type=int,
                             default=None)
         return parent_parser
 
@@ -368,11 +373,15 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         with nullcontext() if self.autograd_backbone and with_loss_and_grad else torch.no_grad():
             step = env_state.current_glimpse
             latent, pos_embed = self.mae.forward_encoder(env_state.current_patches, coords=env_state.current_coords,
-                                                         pad_mask=env_state.current_mask)
+                                                         pad_mask=env_state.current_mask,
+                                                         aux_latent_layer=self.extract_latent_layer)
 
             out, loss, score = self._forward_task(env_state, latent, is_done, with_loss_and_grad, mode)
 
-            all_coords = env_state.all_coords
+            if self.extract_latent_layer is not None:
+                latent = self.mae.aux_latent
+
+            all_coords = env_state.all_coords.clone()
             observation = torch.zeros(latent.shape[0], all_coords.shape[1] + 1,
                                       latent.shape[-1], device=latent.device, dtype=latent.dtype)
             observation[:, :latent.shape[1]].copy_(latent)
@@ -390,7 +399,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         next_state = TensorDict({
             'observation': observation,
             'mask': env_state.all_mask.clone(),
-            'coords': all_coords.clone(),
+            'coords': all_coords,
             'step': torch.ones(size=(latent.shape[0], 1), dtype=torch.long, device=latent.device) * step,
             'done': done,
             'terminated': done,
