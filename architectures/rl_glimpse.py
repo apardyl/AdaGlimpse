@@ -386,6 +386,10 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                                       latent.shape[-1], device=latent.device, dtype=latent.dtype)
             observation[:, :latent.shape[1]].copy_(latent)
 
+            attention = torch.ones(all_coords.shape[0], all_coords.shape[1], device=latent.device,
+                                   dtype=latent.dtype) * -1
+            attention[:, :latent.shape[1] - 1].copy_(self.mae.encoder_attention_rollout())
+
             if self.add_pos_embed:
                 observation[:, 1:latent.shape[1]].add_(pos_embed)
 
@@ -404,6 +408,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
             'done': done,
             'terminated': done,
             'score': score,
+            'attention': attention,
         }, batch_size=observation.shape[0])
 
         self.call_user_forward_hook(env_state, out, score)

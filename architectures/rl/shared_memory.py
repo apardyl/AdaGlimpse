@@ -80,6 +80,7 @@ class SharedMemory:
 
     @action.setter
     def action(self, value: Tensor):
+        assert value.max() <= 1. and value.min() >= 0, 'action must be in range 0-1'
         self._shared["action"][:self.current_batch_size].copy_(value)
 
     @property
