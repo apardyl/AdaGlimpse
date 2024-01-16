@@ -12,6 +12,7 @@ from datasets.base import BaseDataModule
 class AutoconfigLightningModule(LightningModule):
     internal_data = False
     checkpoint_metric = 'val/loss'
+    checkpoint_metric_mode = 'min'
 
 
 class BaseArchitecture(AutoconfigLightningModule, ABC):

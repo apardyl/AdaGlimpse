@@ -266,7 +266,7 @@ class MaskedAutoencoderViT(nn.Module):
     def encoder_attention_rollout(self, head_fusion="mean", discard_ratio=0.5):
         attentions = self.encoder_attn_scores
         if attentions.shape[-1] == 1:
-            return torch.ones(attentions.shape[1], 0, dtype=attentions.dtype, device=attentions.device)
+            return torch.ones(attentions.shape[1], 0, 1, dtype=attentions.dtype, device=attentions.device)
         result = torch.eye(attentions.shape[3], device=attentions.device).unsqueeze(0).repeat(
             (attentions.shape[1], 1, 1))
 
@@ -297,8 +297,8 @@ class MaskedAutoencoderViT(nn.Module):
             result = torch.matmul(a, result)
 
         mask = result[:, 0, 1:]
-        mask = torch.nn.functional.softmax(mask, dim=-1)
-        # mask = mask.reshape(mask.shape[0], self.grid_size[0], self.grid_size[1])
+        # mask = torch.nn.functional.softmax(mask, dim=-1)
+        mask = mask.reshape(mask.shape[0], mask.shape[1], 1)
         return mask.detach()
 
 

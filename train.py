@@ -66,7 +66,8 @@ def main():
         loggers.append(TensorBoardLogger(save_dir='logs/', name=run_name))
 
     callbacks = [
-        ModelCheckpoint(dirpath=f"checkpoints/{run_name}", monitor=model.checkpoint_metric, save_last=True),
+        ModelCheckpoint(dirpath=f"checkpoints/{run_name}", monitor=model.checkpoint_metric,
+                        mode=model.checkpoint_metric_mode, save_last=True),
         RichProgressBar(leave=True, theme=RichProgressBarTheme(metrics_format='.2e')),
         RichModelSummary(max_depth=3),
         LearningRateMonitor(logging_interval='step')
