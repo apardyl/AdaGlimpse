@@ -33,7 +33,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
 
     def __init__(self, datamodule: BaseDataModule, backbone_size='base', pretrained_mae_path=None, num_glimpses=14,
                  max_glimpse_size_ratio=1.0, glimpse_grid_size=2, rl_iters_per_step=1, epochs=100,
-                 init_random_batches=100, freeze_backbone_epochs=1, rl_batch_size=128, replay_buffer_size=10000,
+                 init_random_batches=100, freeze_backbone_epochs=10, rl_batch_size=128, replay_buffer_size=10000,
                  lr=3e-4, backbone_lr=1e-5, parallel_games=2, backbone_training_type: str = 'constant',
                  rl_loss_function: str = 'smooth_l1', glimpse_size_penalty: float = 0., simple_reward=False,
                  early_stop_threshold=None, extract_latent_layer=None, rl_target_entropy=None, **_) -> None:
@@ -142,7 +142,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         parser.add_argument('--freeze-backbone-epochs',
                             help='number of rl training epochs before starting to train the backbone',
                             type=int,
-                            default=1)
+                            default=10)
         parser.add_argument('--backbone-training-type',
                             help='type of backbone training regime',
                             choices=['disabled', 'constant', 'alternating'],
