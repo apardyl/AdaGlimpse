@@ -15,10 +15,10 @@ class ActorNet(nn.Module):
         self.glimpse_net = nn.Sequential(
             nn.Linear(patch_num * 4, hidden_dim),
             # norm_layer(hidden_dim),
-            nn.Tanh(),
+            nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim),
             # norm_layer(hidden_dim),
-            nn.Tanh(),
+            nn.GELU(),
         )
 
         self.glimpse_mask = nn.Parameter(torch.zeros(1, patch_num, 4), requires_grad=True)
@@ -27,7 +27,7 @@ class ActorNet(nn.Module):
         self.rollout_net = nn.Sequential(
             nn.Linear(patch_num, hidden_dim),
             # norm_layer(hidden_dim),
-            nn.Tanh(),
+            nn.GELU(),
         )
 
         self.rollout_mask = nn.Parameter(torch.zeros(1, patch_num, 1), requires_grad=True)
@@ -36,10 +36,10 @@ class ActorNet(nn.Module):
         self.head = nn.Sequential(
             nn.Linear(hidden_dim * 2, hidden_dim),
             # norm_layer(hidden_dim),
-            nn.Tanh(),
+            nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim),
             # norm_layer(hidden_dim),
-            nn.Tanh(),
+            nn.GELU(),
             nn.Linear(hidden_dim, 2 * action_dim),
             NormalParamExtractor(scale_mapping="biased_softplus_0.5"),
         )
@@ -61,10 +61,10 @@ class QValueNet(nn.Module):
         self.glimpse_net = nn.Sequential(
             nn.Linear(patch_num * 4, hidden_dim),
             # norm_layer(hidden_dim),
-            nn.Tanh(),
+            nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim),
             # norm_layer(hidden_dim),
-            nn.Tanh(),
+            nn.GELU(),
         )
 
         self.glimpse_mask = nn.Parameter(torch.zeros(1, patch_num, 4), requires_grad=True)
@@ -73,7 +73,7 @@ class QValueNet(nn.Module):
         self.rollout_net = nn.Sequential(
             nn.Linear(patch_num, hidden_dim),
             # norm_layer(hidden_dim),
-            nn.Tanh(),
+            nn.GELU(),
         )
 
         self.rollout_mask = nn.Parameter(torch.zeros(1, patch_num, 1), requires_grad=True)
@@ -82,19 +82,19 @@ class QValueNet(nn.Module):
         self.action_net = nn.Sequential(
             nn.Linear(action_dim, hidden_dim),
             # norm_layer(hidden_dim),
-            nn.Tanh(),
+            nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim),
             # norm_layer(hidden_dim),
-            nn.Tanh()
+            nn.GELU()
         )
 
         self.head = nn.Sequential(
             nn.Linear(hidden_dim * 3, hidden_dim),
             # norm_layer(hidden_dim),
-            nn.Tanh(),
+            nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim),
             # norm_layer(hidden_dim),
-            nn.Tanh(),
+            nn.GELU(),
             nn.Linear(hidden_dim, 1),
         )
 
@@ -109,7 +109,7 @@ class QValueNet(nn.Module):
 
 
 class TransformerActorCritic(nn.Module):
-    def __init__(self, action_dim=3, norm_layer=partial(nn.LayerNorm, eps=1e-6), embed_dim=768, hidden_dim=128,
+    def __init__(self, action_dim=3, norm_layer=partial(nn.LayerNorm, eps=1e-6), embed_dim=768, hidden_dim=256,
                  patch_num=14 * 4):
         super().__init__()
 

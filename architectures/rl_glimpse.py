@@ -110,7 +110,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         parser.add_argument('--lr',
                             help='learning-rate',
                             type=float,
-                            default=1e-3)
+                            default=1e-4)
         parser.add_argument('--backbone-size',
                             help='backbone ViT size',
                             type=str,
