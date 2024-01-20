@@ -18,7 +18,6 @@ from torchrl.objectives import SACLoss, SoftUpdate
 from architectures.base import AutoconfigLightningModule
 from architectures.mae import MaskedAutoencoderViT, mae_vit_base_patch16, mae_vit_small_patch16, mae_vit_large_patch16
 from architectures.rl.glimpse_engine import glimpse_engine, BaseGlimpseEngine
-from architectures.rl.patchmix import InPlacePatchMix
 from architectures.rl.shared_memory import SharedMemory
 from architectures.rl.transformer_actor_critic import TransformerActorCritic
 from architectures.utils import MetricMixin, RevNormalizer, filter_checkpoint
@@ -33,7 +32,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
 
     def __init__(self, datamodule: BaseDataModule, backbone_size='base', pretrained_mae_path=None, num_glimpses=14,
                  max_glimpse_size_ratio=1.0, glimpse_grid_size=2, rl_iters_per_step=1, epochs=100,
-                 init_random_batches=100, freeze_backbone_epochs=10, rl_batch_size=128, replay_buffer_size=10000,
+                 init_random_batches=1000, freeze_backbone_epochs=10, rl_batch_size=128, replay_buffer_size=10000,
                  lr=3e-4, backbone_lr=1e-5, parallel_games=2, backbone_training_type: str = 'constant',
                  rl_loss_function: str = 'smooth_l1', glimpse_size_penalty: float = 0., simple_reward=False,
                  early_stop_threshold=None, extract_latent_layer=None, rl_target_entropy=None, **_) -> None:
@@ -110,7 +109,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         parser.add_argument('--lr',
                             help='learning-rate',
                             type=float,
-                            default=1e-4)
+                            default=3e-4)
         parser.add_argument('--backbone-size',
                             help='backbone ViT size',
                             type=str,
@@ -118,7 +117,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         parser.add_argument('--backbone-lr',
                             help='backbone learning-rate',
                             type=float,
-                            default=1e-4)
+                            default=1e-5)
         parser.add_argument('--pretrained-mae-path',
                             help='path to pretrained MAE weights',
                             type=str,
@@ -138,7 +137,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         parser.add_argument('--init-random-batches',
                             help='number of random action batches on training start',
                             type=int,
-                            default=100)
+                            default=20000)
         parser.add_argument('--freeze-backbone-epochs',
                             help='number of rl training epochs before starting to train the backbone',
                             type=int,
@@ -179,7 +178,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         parser.add_argument('--simple-reward',
                             help='use simple reward function rather than tracking score differences',
                             type=bool,
-                            default=False,
+                            default=True,
                             action=argparse.BooleanOptionalAction)
         parser.add_argument('--early-stop-threshold',
                             help='exploration early stop score threshold',
@@ -199,7 +198,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         critic_params = list(self.rl_loss_module.qvalue_network_params.flatten_keys().values())
         actor_params = list(self.rl_loss_module.actor_network_params.flatten_keys().values())
 
-        actor_optimizer = torch.optim.AdamW(actor_params, self.lr)
+        actor_optimizer = torch.optim.AdamW(actor_params, self.lr, weight_decay=1e-4)
         actor_scheduler = torch.optim.lr_scheduler.OneCycleLR(
             optimizer=actor_optimizer,
             max_lr=self.lr,
@@ -209,7 +208,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
             epochs=self.epochs,
             steps_per_epoch=self.steps_per_epoch
         )
-        critic_optimizer = torch.optim.AdamW(critic_params, self.lr)
+        critic_optimizer = torch.optim.AdamW(critic_params, self.lr, weight_decay=1e-4)
         critic_scheduler = torch.optim.lr_scheduler.OneCycleLR(
             optimizer=critic_optimizer,
             max_lr=self.lr,
@@ -219,7 +218,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
             epochs=self.epochs,
             steps_per_epoch=self.steps_per_epoch
         )
-        alpha_optimizer = torch.optim.AdamW([self.rl_loss_module.log_alpha], self.lr)
+        alpha_optimizer = torch.optim.AdamW([self.rl_loss_module.log_alpha], self.lr, weight_decay=1e-4)
         alpha_scheduler = torch.optim.lr_scheduler.OneCycleLR(
             optimizer=alpha_optimizer,
             max_lr=self.lr,
@@ -229,7 +228,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
             epochs=self.epochs,
             steps_per_epoch=self.steps_per_epoch
         )
-        backbone_optimizer = torch.optim.AdamW(self.mae.parameters(), self.lr)
+        backbone_optimizer = torch.optim.AdamW(self.mae.parameters(), self.lr, weight_decay=1e-4)
         backbone_scheduler = torch.optim.lr_scheduler.OneCycleLR(
             optimizer=backbone_optimizer,
             max_lr=self.backbone_lr,
@@ -396,7 +395,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
             observation[:, :latent.shape[1]].copy_(latent)
 
             attention = torch.zeros(all_coords.shape[0], all_coords.shape[1], 1, device=latent.device,
-                                   dtype=latent.dtype)
+                                    dtype=latent.dtype)
             attention[:, :latent.shape[1] - 1].copy_(self.mae.encoder_attention_rollout())
 
             if self.add_pos_embed:
@@ -418,6 +417,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
             'terminated': done,
             'score': score,
             'attention': attention,
+            'patches': env_state.all_patches.clone()
         }, batch_size=observation.shape[0])
 
         self.call_user_forward_hook(env_state, out, score)
@@ -444,6 +444,8 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
 
     @property
     def is_backbone_training_enabled(self):
+        if self.real_train_step < self.init_random_batches:
+            return True  # pre-training
         if self.freeze_backbone_epochs > self.current_epoch:
             return False
         if self.backbone_training_type == 'disabled':
@@ -636,24 +638,25 @@ class ReconstructionRlMAE(BaseRlMAE):
 class ClassificationRlMAE(BaseRlMAE):
     checkpoint_metric = 'val/accuracy'
     checkpoint_metric_mode = 'max'
-    autograd_backbone = False
+
+    # autograd_backbone = False
 
     def __init__(self, *args, patch_mix_alpha: float = 1.0, patch_mix_prob: float = 1.0, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
         assert isinstance(self.datamodule, BaseClassificationDataModule)
 
-        self.loss_fn = torch.nn.BCEWithLogitsLoss()
+        self.loss_fn = torch.nn.CrossEntropyLoss()
         self.define_metric('accuracy',
                            partial(torchmetrics.classification.MulticlassAccuracy,
                                    num_classes=self.datamodule.cls_num_classes,
                                    average='micro'))
 
-        self.patch_mix = InPlacePatchMix(
-            patch_mix_alpha=patch_mix_alpha,
-            prob=patch_mix_prob,
-            num_classes=self.datamodule.num_classes
-        )
+        # self.patch_mix = InPlacePatchMix(
+        #     patch_mix_alpha=patch_mix_alpha,
+        #     prob=patch_mix_prob,
+        #     num_classes=self.datamodule.num_classes
+        # )
 
     @classmethod
     def add_argparse_args(cls, parent_parser):
@@ -677,20 +680,21 @@ class ClassificationRlMAE(BaseRlMAE):
     def _create_target_tensor_fn(batch_size: int):
         return torch.zeros(batch_size, dtype=torch.long)
 
-    def backbone_training_step(self, optimizer_backbone, backbone_loss, env_state: SharedMemory):
-        target = self.patch_mix(env_state)
-
-        latent, pos_embed = self.mae.forward_encoder(env_state.current_patches, coords=env_state.current_coords,
-                                                     pad_mask=env_state.current_mask)
-        out = self.mae.forward_head(latent)
-        loss = self.loss_fn(out, target)
-
-        super().backbone_training_step(optimizer_backbone, loss.mean(), env_state)
+    # def backbone_training_step(self, optimizer_backbone, backbone_loss, env_state: SharedMemory):
+    #     target = self.patch_mix(env_state)
+    #
+    #     latent, pos_embed = self.mae.forward_encoder(env_state.current_patches, coords=env_state.current_coords,
+    #                                                  pad_mask=env_state.current_mask)
+    #     out = self.mae.forward_head(latent)
+    #     loss = self.loss_fn(out, target)
+    #
+    #     super().backbone_training_step(optimizer_backbone, loss.mean(), env_state)
 
     def _forward_task(self, state: SharedMemory, latent: torch.Tensor, is_done: bool, with_loss_and_grad: bool,
                       mode: str):
         out = self.mae.forward_head(latent)
         target = state.target
+        loss = self.loss_fn(out, target)
 
         if is_done:
             self.log_metric(mode, 'accuracy', out.detach(), target, on_epoch=True, batch_size=latent.shape[0])
@@ -702,6 +706,6 @@ class ClassificationRlMAE(BaseRlMAE):
 
         score = torch.nn.functional.softmax(out, dim=-1)
         score = score[torch.arange(score.shape[0]), target]
-        score = score * 10
+        score = score
 
-        return out, None, score.reshape(score.shape[0], 1)
+        return out, loss, score.reshape(score.shape[0], 1)
