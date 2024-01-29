@@ -137,7 +137,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         parser.add_argument('--init-random-batches',
                             help='number of random action batches on training start',
                             type=int,
-                            default=20000)
+                            default=10000)
         parser.add_argument('--freeze-backbone-epochs',
                             help='number of rl training epochs before starting to train the backbone',
                             type=int,
@@ -145,11 +145,11 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         parser.add_argument('--backbone-training-type',
                             help='type of backbone training regime',
                             choices=['disabled', 'constant', 'alternating'],
-                            default='constant',
+                            default='alternating',
                             type=str)
         parser.add_argument('--rl-loss-function',
                             help='type of loss function for rl training',
-                            default='smooth_l1',
+                            default='l2',
                             type=str)
         parser.add_argument('--rl-batch-size',
                             help='batch size of the rl loop',
@@ -198,7 +198,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         critic_params = list(self.rl_loss_module.qvalue_network_params.flatten_keys().values())
         actor_params = list(self.rl_loss_module.actor_network_params.flatten_keys().values())
 
-        actor_optimizer = torch.optim.AdamW(actor_params, self.lr, weight_decay=1e-4)
+        actor_optimizer = torch.optim.AdamW(actor_params, self.lr)
         actor_scheduler = torch.optim.lr_scheduler.OneCycleLR(
             optimizer=actor_optimizer,
             max_lr=self.lr,
@@ -208,7 +208,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
             epochs=self.epochs,
             steps_per_epoch=self.steps_per_epoch
         )
-        critic_optimizer = torch.optim.AdamW(critic_params, self.lr, weight_decay=1e-4)
+        critic_optimizer = torch.optim.AdamW(critic_params, self.lr)
         critic_scheduler = torch.optim.lr_scheduler.OneCycleLR(
             optimizer=critic_optimizer,
             max_lr=self.lr,
@@ -218,7 +218,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
             epochs=self.epochs,
             steps_per_epoch=self.steps_per_epoch
         )
-        alpha_optimizer = torch.optim.AdamW([self.rl_loss_module.log_alpha], self.lr, weight_decay=1e-4)
+        alpha_optimizer = torch.optim.AdamW([self.rl_loss_module.log_alpha], self.lr)
         alpha_scheduler = torch.optim.lr_scheduler.OneCycleLR(
             optimizer=alpha_optimizer,
             max_lr=self.lr,
@@ -444,8 +444,6 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
 
     @property
     def is_backbone_training_enabled(self):
-        if self.real_train_step < self.init_random_batches:
-            return True  # pre-training
         if self.freeze_backbone_epochs > self.current_epoch:
             return False
         if self.backbone_training_type == 'disabled':
@@ -706,6 +704,6 @@ class ClassificationRlMAE(BaseRlMAE):
 
         score = torch.nn.functional.softmax(out, dim=-1)
         score = score[torch.arange(score.shape[0]), target]
-        score = score
+        score = score * 10
 
         return out, loss, score.reshape(score.shape[0], 1)

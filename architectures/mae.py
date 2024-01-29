@@ -297,7 +297,7 @@ class MaskedAutoencoderViT(nn.Module):
             result = torch.matmul(a, result)
 
         mask = result[:, 0, 1:]
-        # mask = torch.nn.functional.softmax(mask, dim=-1)
+        mask = torch.nn.functional.softmax(mask, dim=-1)
         mask = mask.reshape(mask.shape[0], mask.shape[1], 1)
         return mask.detach()
 
