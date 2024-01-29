@@ -17,8 +17,8 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from architectures.mae_utils import get_2d_sincos_pos_embed, PatchEmbedElastic, \
-    get_2dplus_sincos_pos_embed_coords, Layer_scale_init_Block
+from architectures.mae_utils import get_2dplus_sincos_pos_embed, PatchEmbedElastic, \
+    get_2dplus_sincos_pos_embed_coords, Layer_scale_init_Block, get_2d_sincos_pos_embed
 
 
 class MaskedAutoencoderViT(nn.Module):
@@ -88,8 +88,8 @@ class MaskedAutoencoderViT(nn.Module):
     def initialize_weights(self):
         # initialization
         # initialize (and freeze) pos_embed by sin-cos embedding
-        pos_embed = get_2d_sincos_pos_embed(self.pos_embed.shape[-1], self.grid_size, cls_token=False)
-        self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
+        pos_embed = get_2dplus_sincos_pos_embed(self.pos_embed.shape[-1], self.grid_size)
+        self.pos_embed.data.copy_(pos_embed.float().unsqueeze(0))
 
         decoder_pos_embed = get_2d_sincos_pos_embed(self.decoder_pos_embed.shape[-1], self.grid_size, cls_token=True)
         self.decoder_pos_embed.data.copy_(torch.from_numpy(decoder_pos_embed).float().unsqueeze(0))

@@ -35,7 +35,8 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                  init_random_batches=1000, freeze_backbone_epochs=10, rl_batch_size=128, replay_buffer_size=10000,
                  lr=3e-4, backbone_lr=1e-5, parallel_games=2, backbone_training_type: str = 'constant',
                  rl_loss_function: str = 'smooth_l1', glimpse_size_penalty: float = 0., simple_reward=False,
-                 early_stop_threshold=None, extract_latent_layer=None, rl_target_entropy=None, **_) -> None:
+                 early_stop_threshold=None, extract_latent_layer=None, rl_target_entropy=None,
+                 use_distilled_targets=False, **_) -> None:
         super().__init__()
 
         self.steps_per_epoch = None
@@ -55,6 +56,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         self.early_stop_threshold = early_stop_threshold
         self.extract_latent_layer = extract_latent_layer
         self.rl_target_entropy = rl_target_entropy
+        self.use_distilled_targets = use_distilled_targets
 
         self.replay_buffer_size = replay_buffer_size
         self.parallel_games = parallel_games
@@ -97,6 +99,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         self.replay_buffer = None
         self.game_state = [None] * max(self.parallel_games, 1)
         self.add_pos_embed = False
+        self.distillation_targets = [None] * max(self.parallel_games, 1)
 
         self.save_hyperparameters(ignore=['datamodule'])
         self._user_forward_hook = None
@@ -192,6 +195,11 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                             help='target entropy for SAC algorithm',
                             type=float,
                             default=None)
+        parser.add_argument('--use-distilled-targets',
+                            help='use distilled targets by running the model on full image',
+                            type=bool,
+                            default=False,
+                            action=argparse.BooleanOptionalAction)
         return parent_parser
 
     def configure_optimizers(self):
@@ -284,6 +292,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
             checkpoint = {'_orig_mod.' + k: v for k, v in checkpoint.items()}
         else:
             raise ValueError("Unable to parse pretrained model checkpoint")
+        del checkpoint['_orig_mod.pos_embed']
         print(self.mae.load_state_dict(checkpoint, strict=False), file=sys.stderr)
 
     def load_pretrained(self, path=""):
@@ -370,12 +379,12 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
 
     @abstractmethod
     def _forward_task(self, state: SharedMemory, latent: torch.Tensor, is_done: bool, with_loss_and_grad: bool,
-                      mode: str):
+                      mode: str, distilled_target: Optional[torch.Tensor] = None):
         """This function implements the task-specific forward pass of the model, including computing the loss value,
         score for RL training, as well as logging any task-specific metrics."""
         raise NotImplementedError()
 
-    def forward_game_state(self, env_state: SharedMemory, mode: str):
+    def forward_game_state(self, env_state: SharedMemory, mode: str, distilled_target: Optional[torch.Tensor] = None):
         is_done = env_state.is_done
         with_loss_and_grad = mode == 'train' and is_done
         with nullcontext() if self.autograd_backbone and with_loss_and_grad else torch.no_grad():
@@ -384,7 +393,8 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                                                          pad_mask=env_state.current_mask,
                                                          aux_latent_layer=self.extract_latent_layer)
 
-            out, loss, score = self._forward_task(env_state, latent, is_done, with_loss_and_grad, mode)
+            out, loss, score = self._forward_task(env_state, latent, is_done, with_loss_and_grad, mode,
+                                                  distilled_target)
 
             if self.extract_latent_layer is not None:
                 latent = self.mae.aux_latent
@@ -502,6 +512,12 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         optimizer_backbone.step()
         self.log(name='train/backbone_loss', value=backbone_loss.mean().item(), on_step=True, on_epoch=False)
 
+    def teacher_step(self, env_state: SharedMemory, game_idx: int):
+        with torch.no_grad():
+            latent, _ = self.mae.forward_encoder(env_state.images)
+            out, _, _ = self._forward_task(env_state, latent, False, False, mode='train')
+            self.distillation_targets[game_idx] = out.clone().detach()
+
     def training_step(self, batch, batch_idx: int):
         scheduler_actor, scheduler_critic, scheduler_alpha, scheduler_backbone = self.lr_schedulers()
         scheduler_actor.step()
@@ -514,7 +530,11 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         game_idx: int
         env_state, game_idx = batch
 
-        next_state, step, backbone_loss = self.forward_game_state(env_state, mode='train')
+        if self.use_distilled_targets and env_state.current_glimpse == 0:
+            self.teacher_step(env_state, game_idx)
+
+        next_state, step, backbone_loss = self.forward_game_state(env_state, mode='train',
+                                                                  distilled_target=self.distillation_targets[game_idx])
         if not env_state.is_done:
             # calculate action and submit it.
             if self.real_train_step < self.init_random_batches:
@@ -612,7 +632,7 @@ class ReconstructionRlMAE(BaseRlMAE):
         self.define_metric('rmse', partial(torchmetrics.MeanSquaredError, squared=False))
 
     def _forward_task(self, state: SharedMemory, latent: torch.Tensor, is_done: bool, with_loss_and_grad: bool,
-                      mode: str):
+                      mode: str, distilled_target: Optional[torch.Tensor] = None):
         out = self.mae.forward_decoder(latent)
         loss = None
         if with_loss_and_grad:
@@ -646,6 +666,10 @@ class ClassificationRlMAE(BaseRlMAE):
 
         self.loss_fn = torch.nn.CrossEntropyLoss()
         self.define_metric('accuracy',
+                           partial(torchmetrics.classification.MulticlassAccuracy,
+                                   num_classes=self.datamodule.cls_num_classes,
+                                   average='micro'))
+        self.define_metric('teacher_accuracy',
                            partial(torchmetrics.classification.MulticlassAccuracy,
                                    num_classes=self.datamodule.cls_num_classes,
                                    average='micro'))
@@ -689,8 +713,9 @@ class ClassificationRlMAE(BaseRlMAE):
     #     super().backbone_training_step(optimizer_backbone, loss.mean(), env_state)
 
     def _forward_task(self, state: SharedMemory, latent: torch.Tensor, is_done: bool, with_loss_and_grad: bool,
-                      mode: str):
+                      mode: str, distilled_target: Optional[torch.Tensor] = None):
         out = self.mae.forward_head(latent)
+
         target = state.target
         loss = self.loss_fn(out, target)
 
@@ -702,8 +727,16 @@ class ClassificationRlMAE(BaseRlMAE):
         # else:
         #     score = (torch.argmax(out, dim=-1) == target) * 7. - 5.
 
-        score = torch.nn.functional.softmax(out, dim=-1)
-        score = score[torch.arange(score.shape[0]), target]
-        score = score * 10
+        if distilled_target is not None:
+            self.log_metric('train', 'teacher_accuracy', distilled_target.argmax(dim=-1), target, on_epoch=True,
+                            batch_size=latent.shape[0])
+            log_target = torch.nn.functional.log_softmax(distilled_target, dim=-1)
+            log_out = torch.nn.functional.log_softmax(out, dim=-1)
+            score = -torch.nn.functional.kl_div(input=log_out, target=log_target, log_target=True, reduction='none').sum(dim=-1)
+        else:
+            score_target = target
+            score = torch.nn.functional.softmax(out, dim=-1)
+            score = score[torch.arange(score.shape[0]), score_target]
+            score = score * 10
 
         return out, loss, score.reshape(score.shape[0], 1)

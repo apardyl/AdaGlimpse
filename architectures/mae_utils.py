@@ -6,6 +6,8 @@ import torch.nn as nn
 from timm.layers import to_2tuple, Format
 from timm.models.layers import DropPath, Mlp
 
+from datasets.patch_sampler import GridSampler
+
 
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
@@ -20,7 +22,6 @@ from timm.models.layers import DropPath, Mlp
 # Transformer: https://github.com/tensorflow/models/blob/master/official/nlp/transformer/model_utils.py
 # MoCo v3: https://github.com/facebookresearch/moco-v3
 # --------------------------------------------------------
-
 
 def get_2d_sincos_pos_embed(embed_dim, grid_size, cls_token=False):
     """
@@ -70,6 +71,24 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
 
     emb = np.concatenate([emb_sin, emb_cos], axis=1)  # (M, D)
     return emb
+
+
+def get_2dplus_sincos_pos_embed(embed_dim, grid_size):
+    """
+    grid_size: int of the grid height and width
+    return:
+    pos_embed: [grid_size*grid_size, embed_dim] or [1+grid_size*grid_size, embed_dim] (w/ or w/o cls_token)
+    """
+    grid_h = np.arange(grid_size[0], dtype=np.float32)
+    grid_w = np.arange(grid_size[1], dtype=np.float32)
+    grid = np.meshgrid(grid_w, grid_h)  # here w goes first
+    grid = np.stack(grid, axis=0)
+
+    grid = grid.reshape([2, 1, grid_size[0], grid_size[1]])
+    grid = torch.from_numpy(grid)
+    grid = torch.stack([grid[1], grid[0], grid[1] + 1, grid[0] + 1], dim=0)
+    pos_embed = get_2dplus_sincos_pos_embed_from_grid(embed_dim, grid)
+    return pos_embed
 
 
 def get_1d_sincos_pos_embed_from_grid_torch(embed_dim, pos):
