@@ -109,7 +109,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         parser.add_argument('--lr',
                             help='learning-rate',
                             type=float,
-                            default=3e-4)
+                            default=1e-3)
         parser.add_argument('--backbone-size',
                             help='backbone ViT size',
                             type=str,
@@ -178,7 +178,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         parser.add_argument('--simple-reward',
                             help='use simple reward function rather than tracking score differences',
                             type=bool,
-                            default=True,
+                            default=False,
                             action=argparse.BooleanOptionalAction)
         parser.add_argument('--early-stop-threshold',
                             help='exploration early stop score threshold',

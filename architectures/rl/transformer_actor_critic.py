@@ -12,6 +12,25 @@ class ActorNet(nn.Module):
     def __init__(self, action_dim, norm_layer, hidden_dim, patch_num):
         super().__init__()
 
+        self.patch_net_conv = nn.Sequential(
+            nn.Conv2d(3, 6, kernel_size=5, stride=1, padding=0),
+            nn.BatchNorm2d(6),
+            nn.GELU(),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.Conv2d(6, 16, kernel_size=5, stride=1, padding=0),
+            nn.BatchNorm2d(16),
+            nn.GELU(),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+        )
+
+        self.patch_net_fc = nn.Sequential(
+            nn.Linear(patch_num * 16, hidden_dim),
+            nn.GELU()
+        )
+
+        self.patch_mask = nn.Parameter(torch.zeros(1, patch_num, 16), requires_grad=True)
+        torch.nn.init.normal_(self.patch_mask, std=.02)
+
         self.glimpse_net = nn.Sequential(
             nn.Linear(patch_num * 4, hidden_dim),
             # norm_layer(hidden_dim),
@@ -34,7 +53,7 @@ class ActorNet(nn.Module):
         torch.nn.init.normal_(self.rollout_mask, std=.02)
 
         self.head = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.Linear(hidden_dim * 3, hidden_dim),
             # norm_layer(hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim),
@@ -44,12 +63,16 @@ class ActorNet(nn.Module):
             NormalParamExtractor(scale_mapping="biased_softplus_0.5"),
         )
 
-    def forward(self, attention, coords, mask):
+    def forward(self, patches, attention, coords, mask):
+        patches = self.patch_net_conv(patches.reshape(-1, 3, 16, 16))
+        patches = patches.reshape(attention.shape[0], attention.shape[1], -1)
+        patches = patches + (mask * self.patch_mask)
+        patches = self.patch_net_fc(patches.reshape(patches.shape[0], -1))
         attention = attention + (mask * self.rollout_mask)
         attention = self.rollout_net(attention.reshape(coords.shape[0], -1))
         coords = coords + (mask * self.glimpse_mask)
         coords = self.glimpse_net(coords.reshape(coords.shape[0], -1))
-        observation = torch.cat([attention, coords], dim=-1)
+        observation = torch.cat([patches, attention, coords], dim=-1)
         observation = self.head(observation)
         return observation
 
@@ -57,6 +80,25 @@ class ActorNet(nn.Module):
 class QValueNet(nn.Module):
     def __init__(self, action_dim, norm_layer, hidden_dim, patch_num):
         super().__init__()
+
+        self.patch_net_conv = nn.Sequential(
+            nn.Conv2d(3, 6, kernel_size=5, stride=1, padding=0),
+            nn.BatchNorm2d(6),
+            nn.GELU(),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.Conv2d(6, 16, kernel_size=5, stride=1, padding=0),
+            nn.BatchNorm2d(16),
+            nn.GELU(),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+        )
+
+        self.patch_net_fc = nn.Sequential(
+            nn.Linear(patch_num * 16, hidden_dim),
+            nn.GELU()
+        )
+
+        self.patch_mask = nn.Parameter(torch.zeros(1, patch_num, 16), requires_grad=True)
+        torch.nn.init.normal_(self.patch_mask, std=.02)
 
         self.glimpse_net = nn.Sequential(
             nn.Linear(patch_num * 4, hidden_dim),
@@ -89,7 +131,7 @@ class QValueNet(nn.Module):
         )
 
         self.head = nn.Sequential(
-            nn.Linear(hidden_dim * 3, hidden_dim),
+            nn.Linear(hidden_dim * 4, hidden_dim),
             # norm_layer(hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim),
@@ -98,13 +140,17 @@ class QValueNet(nn.Module):
             nn.Linear(hidden_dim, 1),
         )
 
-    def forward(self, attention, coords, action, mask):
+    def forward(self, patches, attention, coords, action, mask):
+        patches = self.patch_net_conv(patches.reshape(-1, 3, 16, 16))
+        patches = patches.reshape(attention.shape[0], attention.shape[1], -1)
+        patches = patches + (mask * self.patch_mask)
+        patches = self.patch_net_fc(patches.reshape(patches.shape[0], -1))
         attention = attention + (mask * self.rollout_mask)
         attention = self.rollout_net(attention.reshape(coords.shape[0], -1))
         coords = coords + (mask * self.glimpse_mask)
         coords = self.glimpse_net(coords.reshape(coords.shape[0], -1))
         action = self.action_net(action)
-        observation = torch.cat([attention, coords, action], dim=-1)
+        observation = torch.cat([patches, attention, coords, action], dim=-1)
         return self.head(observation)
 
 
@@ -120,7 +166,7 @@ class TransformerActorCritic(nn.Module):
         self.policy_module = ProbabilisticActor(
             module=TensorDictModule(
                 module=self.actor_net,
-                in_keys=["attention", "coords", "mask"],
+                in_keys=["patches", "attention", "coords", "mask"],
                 out_keys=["loc", "scale"]
             ),
             spec=BoundedTensorSpec(
@@ -144,18 +190,5 @@ class TransformerActorCritic(nn.Module):
 
         self.qvalue_module = ValueOperator(
             module=self.qvalue_net,
-            in_keys=["attention", "coords", "action", "mask"],
+            in_keys=["patches", "attention", "coords", "action", "mask"],
         )
-
-        self.actor_net.apply(self._init_weights)
-        self.qvalue_net.apply(self._init_weights)
-
-    def _init_weights(self, m):
-        if isinstance(m, nn.Linear):
-            # we use xavier_uniform following official JAX ViT:
-            torch.nn.init.xavier_uniform_(m.weight)
-            if isinstance(m, nn.Linear) and m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.LayerNorm):
-            nn.init.constant_(m.bias, 0)
-            nn.init.constant_(m.weight, 1.0)
