@@ -566,6 +566,9 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                 self.game_state[game_idx] = next_state
             else:
                 self.game_state[game_idx] = None
+                self.log(name='train/final_score',
+                         value=state['next', 'score'].sum().item() / state['next', 'score'].shape[0], on_step=True,
+                         on_epoch=False, batch_size=state['next', 'score'].shape[0])
 
             # calculate reward.
             if self.simple_reward:
@@ -732,7 +735,8 @@ class ClassificationRlMAE(BaseRlMAE):
                             batch_size=latent.shape[0])
             log_target = torch.nn.functional.log_softmax(distilled_target, dim=-1)
             log_out = torch.nn.functional.log_softmax(out, dim=-1)
-            score = -torch.nn.functional.kl_div(input=log_out, target=log_target, log_target=True, reduction='none').sum(dim=-1)
+            score = -torch.nn.functional.kl_div(input=log_out, target=log_target, log_target=True,
+                                                reduction='none').sum(dim=-1)
         else:
             score_target = target
             score = torch.nn.functional.softmax(out, dim=-1)
