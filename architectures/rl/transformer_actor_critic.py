@@ -33,10 +33,10 @@ class ActorNet(nn.Module):
 
         self.glimpse_net = nn.Sequential(
             nn.Linear(patch_num * 4, hidden_dim),
-            # norm_layer(hidden_dim),
+            norm_layer(hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim),
-            # norm_layer(hidden_dim),
+            norm_layer(hidden_dim),
             nn.GELU(),
         )
 
@@ -45,7 +45,7 @@ class ActorNet(nn.Module):
 
         self.rollout_net = nn.Sequential(
             nn.Linear(patch_num, hidden_dim),
-            # norm_layer(hidden_dim),
+            norm_layer(hidden_dim),
             nn.GELU(),
         )
 
@@ -54,10 +54,10 @@ class ActorNet(nn.Module):
 
         self.head = nn.Sequential(
             nn.Linear(hidden_dim * 3, hidden_dim),
-            # norm_layer(hidden_dim),
+            norm_layer(hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim),
-            # norm_layer(hidden_dim),
+            norm_layer(hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, 2 * action_dim),
             NormalParamExtractor(scale_mapping="biased_softplus_0.5"),
@@ -102,10 +102,10 @@ class QValueNet(nn.Module):
 
         self.glimpse_net = nn.Sequential(
             nn.Linear(patch_num * 4, hidden_dim),
-            # norm_layer(hidden_dim),
+            norm_layer(hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim),
-            # norm_layer(hidden_dim),
+            norm_layer(hidden_dim),
             nn.GELU(),
         )
 
@@ -114,7 +114,7 @@ class QValueNet(nn.Module):
 
         self.rollout_net = nn.Sequential(
             nn.Linear(patch_num, hidden_dim),
-            # norm_layer(hidden_dim),
+            norm_layer(hidden_dim),
             nn.GELU(),
         )
 
@@ -123,19 +123,19 @@ class QValueNet(nn.Module):
 
         self.action_net = nn.Sequential(
             nn.Linear(action_dim, hidden_dim),
-            # norm_layer(hidden_dim),
+            norm_layer(hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim),
-            # norm_layer(hidden_dim),
+            norm_layer(hidden_dim),
             nn.GELU()
         )
 
         self.head = nn.Sequential(
             nn.Linear(hidden_dim * 4, hidden_dim),
-            # norm_layer(hidden_dim),
+            norm_layer(hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim),
-            # norm_layer(hidden_dim),
+            norm_layer(hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, 1),
         )
