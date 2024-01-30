@@ -89,7 +89,10 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                                       delay_qvalue=True,
                                       alpha_init=1.0,
                                       target_entropy=self.rl_target_entropy)
-        self.rl_loss_module.make_value_estimator(gamma=0.99)
+        self.rl_loss_module.make_value_estimator(
+            gamma=0.99,
+            average_rewards=self.reward_type == 'autonorm'
+        )
         self.target_net_updater = SoftUpdate(self.rl_loss_module, eps=0.995)
 
         self.train_loader = None
@@ -186,7 +189,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                             help='reward type selection',
                             type=str,
                             default='diff',
-                            choices=['diff', 'simple', 'batch-normalised'])
+                            choices=['diff', 'simple', 'batch-normalised', 'autonorm'])
         parser.add_argument('--early-stop-threshold',
                             help='exploration early stop score threshold',
                             type=float,
@@ -575,7 +578,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                          on_epoch=False, batch_size=state['next', 'score'].shape[0])
 
             # calculate reward.
-            if self.reward_type == 'simple':
+            if self.reward_type == 'simple' or self.reward_type == 'autonorm':
                 state['next', 'reward'] = state['next', 'score']
             elif self.reward_type == 'diff':
                 state['next', 'reward'] = state['next', 'score'] - state['score']

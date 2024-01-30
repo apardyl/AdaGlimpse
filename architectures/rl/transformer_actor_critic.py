@@ -8,8 +8,38 @@ from torchrl.data import BoundedTensorSpec
 from torchrl.modules import ProbabilisticActor, ValueOperator, TanhNormal
 
 
+class AttentionHead(nn.Module):
+    def __init__(self, embed_dim, hidden_dim, norm_layer):
+        super().__init__()
+
+        self.attention = nn.Sequential(
+            nn.Linear(embed_dim, hidden_dim // 2),
+            nn.Tanh(),
+            nn.Linear(hidden_dim // 2, 1)
+        )
+
+        self.head = nn.Sequential(
+            nn.Linear(embed_dim, hidden_dim),
+            norm_layer(hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            norm_layer(hidden_dim),
+            nn.GELU()
+        )
+
+    def forward(self, latent: torch.Tensor, mask: torch.Tensor):
+        # latent: B x P x embed_dim
+        att = self.attention(latent)  # B x P x 1
+        att = att.transpose(1, 2)  # B x 1 x P
+        att[..., 1:] += mask.reshape(att.shape[0], 1, -1) * -1e8
+        att = torch.nn.functional.softmax(att, dim=-1)
+        latent = torch.matmul(att, latent)  # B x 1 x embed_dim
+        latent = latent.squeeze(1)  # B x embed_dim
+        return self.head(latent)
+
+
 class ActorNet(nn.Module):
-    def __init__(self, action_dim, norm_layer, hidden_dim, patch_num):
+    def __init__(self, action_dim, norm_layer, hidden_dim, patch_num, embed_dim):
         super().__init__()
 
         self.patch_net_conv = nn.Sequential(
@@ -24,7 +54,8 @@ class ActorNet(nn.Module):
         )
 
         self.patch_net_fc = nn.Sequential(
-            nn.Linear(patch_num * 16, hidden_dim),
+            nn.Linear(patch_num * 16, hidden_dim // 2),
+            norm_layer(hidden_dim // 2),
             nn.GELU()
         )
 
@@ -35,22 +66,21 @@ class ActorNet(nn.Module):
             nn.Linear(patch_num * 4, hidden_dim),
             norm_layer(hidden_dim),
             nn.GELU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            norm_layer(hidden_dim),
-            nn.GELU(),
         )
 
         self.glimpse_mask = nn.Parameter(torch.zeros(1, patch_num, 4), requires_grad=True)
         torch.nn.init.normal_(self.glimpse_mask, std=.02)
 
         self.rollout_net = nn.Sequential(
-            nn.Linear(patch_num, hidden_dim),
-            norm_layer(hidden_dim),
+            nn.Linear(patch_num, hidden_dim // 2),
+            norm_layer(hidden_dim // 2),
             nn.GELU(),
         )
 
         self.rollout_mask = nn.Parameter(torch.zeros(1, patch_num, 1), requires_grad=True)
         torch.nn.init.normal_(self.rollout_mask, std=.02)
+
+        self.embed_net = AttentionHead(embed_dim=embed_dim, hidden_dim=hidden_dim, norm_layer=norm_layer)
 
         self.head = nn.Sequential(
             nn.Linear(hidden_dim * 3, hidden_dim),
@@ -63,7 +93,7 @@ class ActorNet(nn.Module):
             NormalParamExtractor(scale_mapping="biased_softplus_0.5"),
         )
 
-    def forward(self, patches, attention, coords, mask):
+    def forward(self, patches, attention, coords, mask, observation):
         patches = self.patch_net_conv(patches.reshape(-1, 3, 16, 16))
         patches = patches.reshape(attention.shape[0], attention.shape[1], -1)
         patches = patches + (mask * self.patch_mask)
@@ -72,13 +102,14 @@ class ActorNet(nn.Module):
         attention = self.rollout_net(attention.reshape(coords.shape[0], -1))
         coords = coords + (mask * self.glimpse_mask)
         coords = self.glimpse_net(coords.reshape(coords.shape[0], -1))
-        observation = torch.cat([patches, attention, coords], dim=-1)
+        observation = self.embed_net(observation, mask)
+        observation = torch.cat([observation, patches, attention, coords], dim=-1)
         observation = self.head(observation)
         return observation
 
 
 class QValueNet(nn.Module):
-    def __init__(self, action_dim, norm_layer, hidden_dim, patch_num):
+    def __init__(self, action_dim, norm_layer, hidden_dim, patch_num, embed_dim):
         super().__init__()
 
         self.patch_net_conv = nn.Sequential(
@@ -93,7 +124,8 @@ class QValueNet(nn.Module):
         )
 
         self.patch_net_fc = nn.Sequential(
-            nn.Linear(patch_num * 16, hidden_dim),
+            nn.Linear(patch_num * 16, hidden_dim // 2),
+            norm_layer(hidden_dim // 2),
             nn.GELU()
         )
 
@@ -104,30 +136,26 @@ class QValueNet(nn.Module):
             nn.Linear(patch_num * 4, hidden_dim),
             norm_layer(hidden_dim),
             nn.GELU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            norm_layer(hidden_dim),
-            nn.GELU(),
         )
 
         self.glimpse_mask = nn.Parameter(torch.zeros(1, patch_num, 4), requires_grad=True)
         torch.nn.init.normal_(self.glimpse_mask, std=.02)
 
         self.rollout_net = nn.Sequential(
-            nn.Linear(patch_num, hidden_dim),
-            norm_layer(hidden_dim),
+            nn.Linear(patch_num, hidden_dim // 2),
+            norm_layer(hidden_dim // 2),
             nn.GELU(),
         )
 
         self.rollout_mask = nn.Parameter(torch.zeros(1, patch_num, 1), requires_grad=True)
         torch.nn.init.normal_(self.rollout_mask, std=.02)
 
+        self.embed_net = AttentionHead(embed_dim=embed_dim, hidden_dim=hidden_dim, norm_layer=norm_layer)
+
         self.action_net = nn.Sequential(
             nn.Linear(action_dim, hidden_dim),
             norm_layer(hidden_dim),
             nn.GELU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            norm_layer(hidden_dim),
-            nn.GELU()
         )
 
         self.head = nn.Sequential(
@@ -140,7 +168,7 @@ class QValueNet(nn.Module):
             nn.Linear(hidden_dim, 1),
         )
 
-    def forward(self, patches, attention, coords, action, mask):
+    def forward(self, patches, attention, coords, action, mask, observation):
         patches = self.patch_net_conv(patches.reshape(-1, 3, 16, 16))
         patches = patches.reshape(attention.shape[0], attention.shape[1], -1)
         patches = patches + (mask * self.patch_mask)
@@ -150,7 +178,8 @@ class QValueNet(nn.Module):
         coords = coords + (mask * self.glimpse_mask)
         coords = self.glimpse_net(coords.reshape(coords.shape[0], -1))
         action = self.action_net(action)
-        observation = torch.cat([patches, attention, coords, action], dim=-1)
+        observation = self.embed_net(observation, mask)
+        observation = torch.cat([observation, patches, attention, coords, action], dim=-1)
         return self.head(observation)
 
 
@@ -160,13 +189,14 @@ class TransformerActorCritic(nn.Module):
         super().__init__()
 
         self.actor_net = ActorNet(
-            action_dim=action_dim, norm_layer=norm_layer, hidden_dim=hidden_dim, patch_num=patch_num
+            action_dim=action_dim, norm_layer=norm_layer, hidden_dim=hidden_dim, patch_num=patch_num,
+            embed_dim=embed_dim
         )
 
         self.policy_module = ProbabilisticActor(
             module=TensorDictModule(
                 module=self.actor_net,
-                in_keys=["patches", "attention", "coords", "mask"],
+                in_keys=["patches", "attention", "coords", "mask", "observation"],
                 out_keys=["loc", "scale"]
             ),
             spec=BoundedTensorSpec(
@@ -185,10 +215,11 @@ class TransformerActorCritic(nn.Module):
         )
 
         self.qvalue_net = QValueNet(
-            action_dim=action_dim, norm_layer=norm_layer, hidden_dim=hidden_dim, patch_num=patch_num
+            action_dim=action_dim, norm_layer=norm_layer, hidden_dim=hidden_dim, patch_num=patch_num,
+            embed_dim=embed_dim
         )
 
         self.qvalue_module = ValueOperator(
             module=self.qvalue_net,
-            in_keys=["patches", "attention", "coords", "action", "mask"],
+            in_keys=["patches", "attention", "coords", "action", "mask", "observation"],
         )
