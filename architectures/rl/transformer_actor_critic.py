@@ -1,4 +1,5 @@
 from functools import partial
+from typing import List
 
 import torch
 # noinspection PyProtectedMember
@@ -8,149 +9,131 @@ from torchrl.data import BoundedTensorSpec
 from torchrl.modules import ProbabilisticActor, ValueOperator, TanhNormal
 
 
-class AttentionHead(nn.Module):
-    def __init__(self, embed_dim, hidden_dim, norm_layer):
+class AttentionPooling(nn.Module):
+    def __init__(self, input_dim, hidden_dim, norm_layer, num_heads=8):
         super().__init__()
 
-        self.attention = nn.Sequential(
-            nn.Linear(embed_dim, hidden_dim // 2),
-            nn.Tanh(),
-            nn.Linear(hidden_dim // 2, 1)
-        )
+        self.num_heads = num_heads
+        self.hidden_dim = hidden_dim
+        assert hidden_dim % num_heads == 0
 
-        self.head = nn.Sequential(
-            nn.Linear(embed_dim, hidden_dim),
+        self.input_layer = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
             norm_layer(hidden_dim),
             nn.GELU(),
+        )
+
+        self.attention = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, num_heads)
+        )
+
+        self.output_layer = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             norm_layer(hidden_dim),
             nn.GELU()
         )
 
     def forward(self, latent: torch.Tensor, mask: torch.Tensor):
-        # latent: B x P x embed_dim
-        att = self.attention(latent)  # B x P x 1
-        att = att.transpose(1, 2)  # B x 1 x P
-        att[..., 1:] += mask.reshape(att.shape[0], 1, -1) * -1e8
+        B, P = latent.shape[0], latent.shape[1]
+        latent = self.input_layer(latent)  # B x P x D
+        att = self.attention(latent)  # B x P x H
+        att = att.transpose(1, 2).reshape(B, self.num_heads, 1, P)  # B x H x 1 x P
+        att += mask.reshape(att.shape[0], 1, 1, -1) * -1e8
         att = torch.nn.functional.softmax(att, dim=-1)
-        latent = torch.matmul(att, latent)  # B x 1 x embed_dim
-        latent = latent.squeeze(1)  # B x embed_dim
-        return self.head(latent)
+        latent = (latent.reshape(B, P, self.num_heads, self.hidden_dim // self.num_heads)
+                  .permute(0, 2, 1, 3))  # B x H x P x (D / H)
+        latent = torch.matmul(att, latent)  # B x H x 1 x (D / H)
+        latent = latent.reshape(B, self.hidden_dim)  # B x H
+        return self.output_layer(latent)
 
 
-class ActorNet(nn.Module):
-    def __init__(self, action_dim, norm_layer, hidden_dim, patch_num, embed_dim):
+class BaseAgentNet(nn.Module):
+    def __init__(self, input_dims: List[int], hidden_dim: int, norm_layer: nn.Module, patch_num: int):
         super().__init__()
 
+        self.input_dims = input_dims
+        common_dim = 2 * hidden_dim // len(input_dims)
+        self.patch_num = patch_num
+
+        self.input_layers = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(dim, common_dim),
+                norm_layer(common_dim),
+                nn.GELU()
+            )
+            for dim in input_dims
+        ])
+
+        self.pooling = AttentionPooling(input_dim=common_dim * len(input_dims), hidden_dim=hidden_dim,
+                                        norm_layer=norm_layer)
+
+    def _base_forward(self, mask: torch.Tensor, *x: torch.Tensor):
+        assert len(x) == len(self.input_layers)
+        x = list(x)
+
+        B = x[0].shape[0]
+
+        for idx in range(len(x)):
+            c = x[idx].reshape(B, -1, self.input_dims[idx])
+            c = c[:, -self.patch_num:, :]  # remove cls token
+            c = self.input_layers[idx](c)
+            x[idx] = c
+
+        x = torch.cat(x, dim=-1)
+        x = self.pooling(x, mask)
+        return x
+
+
+class ActorNet(BaseAgentNet):
+    def __init__(self, action_dim, norm_layer, hidden_dim, patch_num, embed_dim):
+        super().__init__(input_dims=[32, 1, 4, embed_dim], hidden_dim=hidden_dim, norm_layer=norm_layer,
+                         patch_num=patch_num)
+
         self.patch_net_conv = nn.Sequential(
-            nn.Conv2d(3, 6, kernel_size=5, stride=1, padding=0),
-            nn.BatchNorm2d(6),
+            nn.Conv2d(3, 8, kernel_size=5, stride=1, padding=0),
+            nn.BatchNorm2d(8),
             nn.GELU(),
             nn.MaxPool2d(kernel_size=2, stride=2),
-            nn.Conv2d(6, 16, kernel_size=5, stride=1, padding=0),
-            nn.BatchNorm2d(16),
+            nn.Conv2d(8, 32, kernel_size=5, stride=1, padding=0),
+            nn.BatchNorm2d(32),
             nn.GELU(),
             nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.Flatten(),
         )
-
-        self.patch_net_fc = nn.Sequential(
-            nn.Linear(patch_num * 16, hidden_dim // 2),
-            norm_layer(hidden_dim // 2),
-            nn.GELU()
-        )
-
-        self.patch_mask = nn.Parameter(torch.zeros(1, patch_num, 16), requires_grad=True)
-        torch.nn.init.normal_(self.patch_mask, std=.02)
-
-        self.glimpse_net = nn.Sequential(
-            nn.Linear(patch_num * 4, hidden_dim),
-            norm_layer(hidden_dim),
-            nn.GELU(),
-        )
-
-        self.glimpse_mask = nn.Parameter(torch.zeros(1, patch_num, 4), requires_grad=True)
-        torch.nn.init.normal_(self.glimpse_mask, std=.02)
-
-        self.rollout_net = nn.Sequential(
-            nn.Linear(patch_num, hidden_dim // 2),
-            norm_layer(hidden_dim // 2),
-            nn.GELU(),
-        )
-
-        self.rollout_mask = nn.Parameter(torch.zeros(1, patch_num, 1), requires_grad=True)
-        torch.nn.init.normal_(self.rollout_mask, std=.02)
-
-        self.embed_net = AttentionHead(embed_dim=embed_dim, hidden_dim=hidden_dim, norm_layer=norm_layer)
 
         self.head = nn.Sequential(
-            nn.Linear(hidden_dim * 3, hidden_dim),
-            norm_layer(hidden_dim),
-            nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim),
-            norm_layer(hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, 2 * action_dim),
             NormalParamExtractor(scale_mapping="biased_softplus_0.5"),
         )
 
-    def forward(self, patches, attention, coords, mask, observation):
-        patches = self.patch_net_conv(patches.reshape(-1, 3, 16, 16))
-        patches = patches.reshape(attention.shape[0], attention.shape[1], -1)
-        patches = patches + (mask * self.patch_mask)
-        patches = self.patch_net_fc(patches.reshape(patches.shape[0], -1))
-        attention = attention + (mask * self.rollout_mask)
-        attention = self.rollout_net(attention.reshape(coords.shape[0], -1))
-        coords = coords + (mask * self.glimpse_mask)
-        coords = self.glimpse_net(coords.reshape(coords.shape[0], -1))
-        observation = self.embed_net(observation, mask)
-        observation = torch.cat([observation, patches, attention, coords], dim=-1)
+    def forward(self, patches, attention, coords, mask: torch.Tensor, observation):
+        patches = (self.patch_net_conv(patches.reshape(-1, 3, 16, 16))
+                   .reshape(attention.shape[0], attention.shape[1], -1))
+        observation = super()._base_forward(mask, patches, attention, coords, observation)
         observation = self.head(observation)
         return observation
 
 
-class QValueNet(nn.Module):
+class QValueNet(BaseAgentNet):
     def __init__(self, action_dim, norm_layer, hidden_dim, patch_num, embed_dim):
-        super().__init__()
+        super().__init__(input_dims=[32, 1, 4, embed_dim], hidden_dim=hidden_dim, norm_layer=norm_layer,
+                         patch_num=patch_num)
 
         self.patch_net_conv = nn.Sequential(
-            nn.Conv2d(3, 6, kernel_size=5, stride=1, padding=0),
-            nn.BatchNorm2d(6),
+            nn.Conv2d(3, 8, kernel_size=5, stride=1, padding=0),
+            nn.BatchNorm2d(8),
             nn.GELU(),
             nn.MaxPool2d(kernel_size=2, stride=2),
-            nn.Conv2d(6, 16, kernel_size=5, stride=1, padding=0),
-            nn.BatchNorm2d(16),
+            nn.Conv2d(8, 32, kernel_size=5, stride=1, padding=0),
+            nn.BatchNorm2d(32),
             nn.GELU(),
             nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.Flatten(),
         )
-
-        self.patch_net_fc = nn.Sequential(
-            nn.Linear(patch_num * 16, hidden_dim // 2),
-            norm_layer(hidden_dim // 2),
-            nn.GELU()
-        )
-
-        self.patch_mask = nn.Parameter(torch.zeros(1, patch_num, 16), requires_grad=True)
-        torch.nn.init.normal_(self.patch_mask, std=.02)
-
-        self.glimpse_net = nn.Sequential(
-            nn.Linear(patch_num * 4, hidden_dim),
-            norm_layer(hidden_dim),
-            nn.GELU(),
-        )
-
-        self.glimpse_mask = nn.Parameter(torch.zeros(1, patch_num, 4), requires_grad=True)
-        torch.nn.init.normal_(self.glimpse_mask, std=.02)
-
-        self.rollout_net = nn.Sequential(
-            nn.Linear(patch_num, hidden_dim // 2),
-            norm_layer(hidden_dim // 2),
-            nn.GELU(),
-        )
-
-        self.rollout_mask = nn.Parameter(torch.zeros(1, patch_num, 1), requires_grad=True)
-        torch.nn.init.normal_(self.rollout_mask, std=.02)
-
-        self.embed_net = AttentionHead(embed_dim=embed_dim, hidden_dim=hidden_dim, norm_layer=norm_layer)
 
         self.action_net = nn.Sequential(
             nn.Linear(action_dim, hidden_dim),
@@ -159,28 +142,18 @@ class QValueNet(nn.Module):
         )
 
         self.head = nn.Sequential(
-            nn.Linear(hidden_dim * 4, hidden_dim),
-            norm_layer(hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            norm_layer(hidden_dim),
+            nn.Linear(2 * hidden_dim, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, 1),
         )
 
     def forward(self, patches, attention, coords, action, mask, observation):
-        patches = self.patch_net_conv(patches.reshape(-1, 3, 16, 16))
-        patches = patches.reshape(attention.shape[0], attention.shape[1], -1)
-        patches = patches + (mask * self.patch_mask)
-        patches = self.patch_net_fc(patches.reshape(patches.shape[0], -1))
-        attention = attention + (mask * self.rollout_mask)
-        attention = self.rollout_net(attention.reshape(coords.shape[0], -1))
-        coords = coords + (mask * self.glimpse_mask)
-        coords = self.glimpse_net(coords.reshape(coords.shape[0], -1))
+        patches = (self.patch_net_conv(patches.reshape(-1, 3, 16, 16))
+                   .reshape(attention.shape[0], attention.shape[1], -1))
+        observation = super()._base_forward(mask, patches, attention, coords, observation)
         action = self.action_net(action)
-        observation = self.embed_net(observation, mask)
-        observation = torch.cat([observation, patches, attention, coords, action], dim=-1)
-        return self.head(observation)
+        observation = self.head(torch.cat([observation, action], dim=-1))
+        return observation
 
 
 class TransformerActorCritic(nn.Module):
