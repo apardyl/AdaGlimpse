@@ -34,7 +34,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                  max_glimpse_size_ratio=1.0, glimpse_grid_size=2, rl_iters_per_step=1, epochs=100,
                  init_random_batches=1000, freeze_backbone_epochs=10, rl_batch_size=128, replay_buffer_size=10000,
                  lr=3e-4, backbone_lr=1e-5, parallel_games=2, backbone_training_type: str = 'constant',
-                 rl_loss_function: str = 'smooth_l1', glimpse_size_penalty: float = 0., simple_reward=False,
+                 rl_loss_function: str = 'smooth_l1', glimpse_size_penalty: float = 0., reward_type='diff',
                  early_stop_threshold=None, extract_latent_layer=None, rl_target_entropy=None,
                  use_distilled_targets=False, **_) -> None:
         super().__init__()
@@ -52,7 +52,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         self.backbone_lr = backbone_lr
         self.backbone_training_type = backbone_training_type
         self.glimpse_size_penalty = glimpse_size_penalty
-        self.simple_reward = simple_reward
+        self.reward_type = reward_type
         self.early_stop_threshold = early_stop_threshold
         self.extract_latent_layer = extract_latent_layer
         self.rl_target_entropy = rl_target_entropy
@@ -105,6 +105,10 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         self._user_forward_hook = None
 
         self.real_train_step = 0
+
+        self.reward_norm = None
+        if self.reward_type == 'batch-normalised':
+            self.reward_norm = torch.nn.SyncBatchNorm(1, track_running_stats=False)
 
     @classmethod
     def add_argparse_args(cls, parent_parser):
@@ -178,11 +182,11 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                             help='penalty coefficient for large glimpses',
                             type=float,
                             default=0)
-        parser.add_argument('--simple-reward',
-                            help='use simple reward function rather than tracking score differences',
-                            type=bool,
-                            default=False,
-                            action=argparse.BooleanOptionalAction)
+        parser.add_argument('--reward-type',
+                            help='reward type selection',
+                            type=str,
+                            default='diff',
+                            choices=['diff', 'simple', 'batch-normalised'])
         parser.add_argument('--early-stop-threshold',
                             help='exploration early stop score threshold',
                             type=float,
@@ -571,10 +575,14 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                          on_epoch=False, batch_size=state['next', 'score'].shape[0])
 
             # calculate reward.
-            if self.simple_reward:
+            if self.reward_type == 'simple':
                 state['next', 'reward'] = state['next', 'score']
-            else:
+            elif self.reward_type == 'diff':
                 state['next', 'reward'] = state['next', 'score'] - state['score']
+            elif self.reward_type == 'batch-normalised':
+                state['next', 'reward'] = self.reward_norm(state['next', 'score'].unsqueeze(-1)).squeeze(-1)
+            else:
+                assert False
 
             if not is_done and self.glimpse_size_penalty > 0.:
                 state['next', 'reward'] = (state['next', 'reward'] -
