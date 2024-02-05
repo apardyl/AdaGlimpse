@@ -29,7 +29,8 @@ class MaskedAutoencoderViT(nn.Module):
                  embed_dim=1024, depth=24, num_heads=16,
                  decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16,
                  mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, drop_rate: float = 0.,
-                 fc_norm: Optional[bool] = None, global_pool: str = 'token', num_classes: int = 1000):
+                 fc_norm: Optional[bool] = None, global_pool: str = 'token', num_classes: int = 1000,
+                 with_decoder=True):
         super().__init__()
 
         assert global_pool in ('', 'avg', 'token')
@@ -57,25 +58,27 @@ class MaskedAutoencoderViT(nn.Module):
 
         # --------------------------------------------------------------------------
         # MAE decoder specifics
-        self.decoder_embed = nn.Linear(embed_dim, decoder_embed_dim, bias=True)
+        self.with_decoder = with_decoder
+        if with_decoder:
+            self.decoder_embed = nn.Linear(embed_dim, decoder_embed_dim, bias=True)
 
-        self.mask_token = nn.Parameter(torch.zeros(1, 1, decoder_embed_dim))
+            self.mask_token = nn.Parameter(torch.zeros(1, 1, decoder_embed_dim))
 
-        self.decoder_pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, decoder_embed_dim),
+            self.decoder_pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, decoder_embed_dim),
                                               requires_grad=False)  # fixed sin-cos embedding
 
-        self.decoder_blocks = nn.ModuleList([
-            Layer_scale_init_Block(decoder_embed_dim, decoder_num_heads, mlp_ratio, qkv_bias=True, qk_scale=None,
-                                   norm_layer=norm_layer)
-            for i in range(decoder_depth)])
+            self.decoder_blocks = nn.ModuleList([
+                Layer_scale_init_Block(decoder_embed_dim, decoder_num_heads, mlp_ratio, qkv_bias=True, qk_scale=None,
+                                       norm_layer=norm_layer)
+                for i in range(decoder_depth)])
 
-        self.decoder_norm = norm_layer(decoder_embed_dim)
-        self.decoder_pred = nn.Linear(decoder_embed_dim, patch_size ** 2 * out_chans, bias=True)  # decoder to patch
-        # --------------------------------------------------------------------------
+            self.decoder_norm = norm_layer(decoder_embed_dim)
+            self.decoder_pred = nn.Linear(decoder_embed_dim, patch_size ** 2 * out_chans, bias=True)  # decoder to patch
+            # --------------------------------------------------------------------------
 
-        self.norm_pix_loss = norm_pix_loss
+            self.norm_pix_loss = norm_pix_loss
 
-        self.decoder_output_tokens = self.decoder_pos_embed.shape[1] - 1
+            self.decoder_output_tokens = self.decoder_pos_embed.shape[1] - 1
 
         # Classifier Head
         self.fc_norm = norm_layer(embed_dim) if use_fc_norm else nn.Identity()
@@ -91,8 +94,9 @@ class MaskedAutoencoderViT(nn.Module):
         pos_embed = get_2dplus_sincos_pos_embed(self.pos_embed.shape[-1], self.grid_size)
         self.pos_embed.data.copy_(pos_embed.float().unsqueeze(0))
 
-        decoder_pos_embed = get_2d_sincos_pos_embed(self.decoder_pos_embed.shape[-1], self.grid_size, cls_token=True)
-        self.decoder_pos_embed.data.copy_(torch.from_numpy(decoder_pos_embed).float().unsqueeze(0))
+        if self.with_decoder:
+            decoder_pos_embed = get_2d_sincos_pos_embed(self.decoder_pos_embed.shape[-1], self.grid_size, cls_token=True)
+            self.decoder_pos_embed.data.copy_(torch.from_numpy(decoder_pos_embed).float().unsqueeze(0))
 
         # initialize patch_embed like nn.Linear (instead of nn.Conv2d)
         w = self.patch_embed.proj.weight.data
@@ -100,7 +104,8 @@ class MaskedAutoencoderViT(nn.Module):
 
         # timm's trunc_normal_(std=.02) is effectively normal_(std=0.02) as cutoff is too big (2.)
         torch.nn.init.normal_(self.cls_token, std=.02)
-        torch.nn.init.normal_(self.mask_token, std=.02)
+        if self.with_decoder:
+            torch.nn.init.normal_(self.mask_token, std=.02)
 
         # initialize nn.Linear and nn.LayerNorm
         self.apply(self._init_weights)

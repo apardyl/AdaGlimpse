@@ -29,6 +29,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
     internal_data = True
     checkpoint_metric = None
     autograd_backbone = True
+    needs_decoder = True
 
     def __init__(self, datamodule: BaseDataModule, backbone_size='base', pretrained_mae_path=None, num_glimpses=14,
                  max_glimpse_size_ratio=1.0, glimpse_grid_size=2, rl_iters_per_step=1, epochs=100,
@@ -69,7 +70,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
             'small': mae_vit_small_patch16,
             'base': mae_vit_base_patch16,
             'large': mae_vit_large_patch16
-        }[backbone_size](img_size=datamodule.image_size, out_chans=3)
+        }[backbone_size](img_size=datamodule.image_size, out_chans=3, with_decoder=self.needs_decoder)
         # noinspection PyTypeChecker
         self.mae: MaskedAutoencoderViT = torch.compile(self.mae, mode='reduce-overhead')
 
@@ -112,6 +113,14 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         self.reward_norm = None
         if self.reward_type == 'batch-normalised':
             self.reward_norm = torch.nn.SyncBatchNorm(1, track_running_stats=False)
+
+        self.teacher_model = None
+        if self.use_distilled_targets:
+            self.teacher_model = mae_vit_base_patch16(img_size=datamodule.image_size, with_decoder=False)
+            self.load_teacher('deit_3_base_224_21k.pth')
+            for p in self.teacher_model.parameters():
+                p.requires_grad = False
+            self.teacher_model = torch.compile(self.teacher_model, mode='reduce-overhead')
 
     @classmethod
     def add_argparse_args(cls, parent_parser):
@@ -307,6 +316,10 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         checkpoint = checkpoint["state_dict"]
         self.mae.load_state_dict(filter_checkpoint(checkpoint, 'mae.'), strict=True)
         self.actor_critic.load_state_dict(filter_checkpoint(checkpoint, 'actor_critic.'), strict=True)
+
+    def load_teacher(self, path):
+        checkpoint = torch.load(path, map_location='cpu')
+        print(self.teacher_model.load_state_dict(checkpoint['model'], strict=False), file=sys.stderr)
 
     @staticmethod
     def _copy_target_tensor_fn(target: torch.Tensor, batch: Dict[str, torch.Tensor]):
@@ -519,11 +532,11 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         optimizer_backbone.step()
         self.log(name='train/backbone_loss', value=backbone_loss.mean().item(), on_step=True, on_epoch=False)
 
+    @torch.inference_mode()
     def teacher_step(self, env_state: SharedMemory, game_idx: int):
-        with torch.no_grad():
-            latent, _ = self.mae.forward_encoder(env_state.images)
-            out, _, _ = self._forward_task(env_state, latent, False, False, mode='train')
-            self.distillation_targets[game_idx] = out.clone().detach()
+        latent, _ = self.teacher_model.forward_encoder(env_state.images)
+        out = self.teacher_model.forward_head(latent)
+        self.distillation_targets[game_idx] = out.clone().detach()
 
     def training_step(self, batch, batch_idx: int):
         scheduler_actor, scheduler_critic, scheduler_alpha, scheduler_backbone = self.lr_schedulers()
@@ -670,6 +683,7 @@ class ReconstructionRlMAE(BaseRlMAE):
 class ClassificationRlMAE(BaseRlMAE):
     checkpoint_metric = 'val/accuracy'
     checkpoint_metric_mode = 'max'
+    needs_decoder = False
 
     # autograd_backbone = False
 
@@ -730,28 +744,31 @@ class ClassificationRlMAE(BaseRlMAE):
                       mode: str, distilled_target: Optional[torch.Tensor] = None):
         out = self.mae.forward_head(latent)
 
-        target = state.target
-        loss = self.loss_fn(out, target)
+        true_target = state.target
 
         if is_done:
-            self.log_metric(mode, 'accuracy', out.detach(), target, on_epoch=True, batch_size=latent.shape[0])
-
-        # if not is_done:
-        #     score = (torch.argmax(out, dim=-1) == target) * 1. / self.num_glimpses
-        # else:
-        #     score = (torch.argmax(out, dim=-1) == target) * 7. - 5.
+            self.log_metric(mode, 'accuracy', out.detach(), true_target, on_epoch=True, batch_size=latent.shape[0])
 
         if distilled_target is not None:
-            self.log_metric('train', 'teacher_accuracy', distilled_target.argmax(dim=-1), target, on_epoch=True,
-                            batch_size=latent.shape[0])
+            if is_done:
+                self.log_metric('train', 'teacher_accuracy', distilled_target.argmax(dim=-1), true_target,
+                                on_epoch=True,
+                                batch_size=latent.shape[0])
             log_target = torch.nn.functional.log_softmax(distilled_target, dim=-1)
             log_out = torch.nn.functional.log_softmax(out, dim=-1)
-            score = -torch.nn.functional.kl_div(input=log_out, target=log_target, log_target=True,
+            kl = torch.nn.functional.kl_div(input=log_out, target=log_target, log_target=True,
                                                 reduction='none').sum(dim=-1)
+            score = -kl
+            loss = kl.mean()
         else:
-            score_target = target
+            if mode == 'train':
+                score_target = true_target
+            else:
+                # use model output for early stopping in validation
+                score_target = out.argmax(dim=-1)
             score = torch.nn.functional.softmax(out, dim=-1)
             score = score[torch.arange(score.shape[0]), score_target]
             score = score * 10
+            loss = self.loss_fn(out, true_target)
 
         return out, loss, score.reshape(score.shape[0], 1)
