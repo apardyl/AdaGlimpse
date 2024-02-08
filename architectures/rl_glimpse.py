@@ -13,11 +13,12 @@ from tensordict import TensorDict
 from torch.utils.data import DistributedSampler
 from torchrl.data import ReplayBuffer, LazyTensorStorage, BoundedTensorSpec
 from torchrl.envs.utils import ExplorationType, set_exploration_type
-from torchrl.objectives import SACLoss, SoftUpdate
+from torchrl.objectives import SoftUpdate
 
 from architectures.base import AutoconfigLightningModule
 from architectures.mae import MaskedAutoencoderViT, mae_vit_base_patch16, mae_vit_small_patch16, mae_vit_large_patch16
 from architectures.rl.glimpse_engine import glimpse_engine, BaseGlimpseEngine
+from architectures.rl.sac import GlimpseSACLoss
 from architectures.rl.shared_memory import SharedMemory
 from architectures.rl.transformer_actor_critic import TransformerActorCritic
 from architectures.utils import MetricMixin, RevNormalizer, filter_checkpoint
@@ -37,7 +38,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                  lr=3e-4, backbone_lr=1e-5, parallel_games=2, backbone_training_type: str = 'constant',
                  rl_loss_function: str = 'smooth_l1', glimpse_size_penalty: float = 0., reward_type='diff',
                  early_stop_threshold=None, extract_latent_layer=None, rl_target_entropy=None,
-                 use_distilled_targets=False, **_) -> None:
+                 use_distilled_targets=False, use_popart=False, **_) -> None:
         super().__init__()
 
         self.steps_per_epoch = None
@@ -83,13 +84,15 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         if self.rl_target_entropy is None:
             self.rl_target_entropy = 'auto'
 
-        self.rl_loss_module = SACLoss(actor_network=self.actor_critic.policy_module,
-                                      qvalue_network=self.actor_critic.qvalue_module,
-                                      loss_function=rl_loss_function,
-                                      delay_actor=False,
-                                      delay_qvalue=True,
-                                      alpha_init=1.0,
-                                      target_entropy=self.rl_target_entropy)
+        self.rl_loss_module = GlimpseSACLoss(num_glimpses=self.num_glimpses,
+                                             actor_network=self.actor_critic.policy_module,
+                                             qvalue_network=self.actor_critic.qvalue_module,
+                                             loss_function=rl_loss_function,
+                                             delay_actor=False,
+                                             delay_qvalue=True,
+                                             alpha_init=1.0,
+                                             target_entropy=self.rl_target_entropy,
+                                             popart=use_popart)
         self.rl_loss_module.make_value_estimator(
             gamma=0.99,
             average_rewards=self.reward_type == 'autonorm'
@@ -213,6 +216,11 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                             default=None)
         parser.add_argument('--use-distilled-targets',
                             help='use distilled targets by running the model on full image',
+                            type=bool,
+                            default=False,
+                            action=argparse.BooleanOptionalAction)
+        parser.add_argument('--use-popart',
+                            help='use popart normalization',
                             type=bool,
                             default=False,
                             action=argparse.BooleanOptionalAction)
@@ -757,7 +765,7 @@ class ClassificationRlMAE(BaseRlMAE):
             log_target = torch.nn.functional.log_softmax(distilled_target, dim=-1)
             log_out = torch.nn.functional.log_softmax(out, dim=-1)
             kl = torch.nn.functional.kl_div(input=log_out, target=log_target, log_target=True,
-                                                reduction='none').sum(dim=-1)
+                                            reduction='none').sum(dim=-1)
             score = -kl
             loss = kl.mean()
         else:
