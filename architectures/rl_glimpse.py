@@ -111,11 +111,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
 
         self.teacher_model = None
         if self.teacher_path is not None:
-            self.teacher_model = {
-                'small': mae_vit_small_patch16,
-                'base': mae_vit_base_patch16,
-                'large': mae_vit_large_patch16
-            }[backbone_size](img_size=datamodule.image_size, with_decoder=False)
+            self.teacher_model = mae_vit_base_patch16(img_size=datamodule.image_size, with_decoder=False)
             self.load_teacher(teacher_path)
             for p in self.teacher_model.parameters():
                 p.requires_grad = False
