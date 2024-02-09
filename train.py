@@ -44,6 +44,10 @@ def define_args(parent_parser):
                         type=bool,
                         default=False,
                         action=argparse.BooleanOptionalAction)
+    parser.add_argument('--resume',
+                        help='resume from checkpoint',
+                        type=str,
+                        default=None)
     return parent_parser
 
 
@@ -116,14 +120,14 @@ def main():
         }
 
     if args.validate_only:
-        trainer.validate(**kwargs)
+        trainer.validate(**kwargs, ckpt_path=args.resume)
         return
 
     if args.test_only:
-        trainer.test(**kwargs)
+        trainer.test(**kwargs, ckpt_path=args.resume)
         return
 
-    trainer.fit(**kwargs)
+    trainer.fit(**kwargs, ckpt_path=args.resume)
 
 
 if __name__ == "__main__":

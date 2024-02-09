@@ -1,9 +1,8 @@
-import argparse
 import sys
 from abc import ABC, abstractmethod
 from contextlib import nullcontext
 from functools import partial
-from typing import Optional, Dict
+from typing import Optional, Dict, Any
 
 import torch
 import torchmetrics
@@ -644,6 +643,24 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         if self._user_forward_hook:
             with torch.no_grad():
                 self._user_forward_hook(*args, **kwargs)
+
+    def on_load_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
+        # manual restore RL state (workaround issue in torchrl)
+        state_dict = checkpoint['state_dict']
+        rl_state_dict = {}
+        for k in list(state_dict.keys()):
+            if k.startswith('rl_loss_module.'):
+                rl_state_dict[k[len('rl_loss_module.'):]] = state_dict[k]
+        print(self.rl_loss_module.load_state_dict(rl_state_dict, strict=False))
+
+        def stub(*args, **kwargs):
+            pass
+
+        # prevent auto-restore by lightning
+        self.rl_loss_module._load_from_state_dict = stub
+        self.rl_loss_module.actor_network_params._load_from_state_dict = stub
+        self.rl_loss_module.qvalue_network_params._load_from_state_dict = stub
+        self.rl_loss_module.target_qvalue_network_params._load_from_state_dict = stub
 
 
 class ReconstructionRlMAE(BaseRlMAE):
