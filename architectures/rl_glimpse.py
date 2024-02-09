@@ -13,12 +13,11 @@ from tensordict import TensorDict
 from torch.utils.data import DistributedSampler
 from torchrl.data import ReplayBuffer, LazyTensorStorage, BoundedTensorSpec
 from torchrl.envs.utils import ExplorationType, set_exploration_type
-from torchrl.objectives import SoftUpdate
+from torchrl.objectives import SoftUpdate, SACLoss
 
 from architectures.base import AutoconfigLightningModule
 from architectures.mae import MaskedAutoencoderViT, mae_vit_base_patch16, mae_vit_small_patch16, mae_vit_large_patch16
 from architectures.rl.glimpse_engine import glimpse_engine, BaseGlimpseEngine
-from architectures.rl.sac import GlimpseSACLoss
 from architectures.rl.shared_memory import SharedMemory
 from architectures.rl.transformer_actor_critic import TransformerActorCritic
 from architectures.utils import MetricMixin, RevNormalizer, filter_checkpoint
@@ -38,7 +37,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                  lr=3e-4, backbone_lr=1e-5, parallel_games=2, backbone_training_type: str = 'constant',
                  rl_loss_function: str = 'smooth_l1', glimpse_size_penalty: float = 0., reward_type='diff',
                  early_stop_threshold=None, extract_latent_layer=None, rl_target_entropy=None,
-                 use_distilled_targets=False, use_popart=False, **_) -> None:
+                 teacher_path=None, **_) -> None:
         super().__init__()
 
         self.steps_per_epoch = None
@@ -58,7 +57,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         self.early_stop_threshold = early_stop_threshold
         self.extract_latent_layer = extract_latent_layer
         self.rl_target_entropy = rl_target_entropy
-        self.use_distilled_targets = use_distilled_targets
+        self.teacher_path = teacher_path
 
         self.replay_buffer_size = replay_buffer_size
         self.parallel_games = parallel_games
@@ -84,15 +83,13 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         if self.rl_target_entropy is None:
             self.rl_target_entropy = 'auto'
 
-        self.rl_loss_module = GlimpseSACLoss(num_glimpses=self.num_glimpses,
-                                             actor_network=self.actor_critic.policy_module,
-                                             qvalue_network=self.actor_critic.qvalue_module,
-                                             loss_function=rl_loss_function,
-                                             delay_actor=False,
-                                             delay_qvalue=True,
-                                             alpha_init=1.0,
-                                             target_entropy=self.rl_target_entropy,
-                                             popart=use_popart)
+        self.rl_loss_module = SACLoss(actor_network=self.actor_critic.policy_module,
+                                      qvalue_network=self.actor_critic.qvalue_module,
+                                      loss_function=rl_loss_function,
+                                      delay_actor=False,
+                                      delay_qvalue=True,
+                                      alpha_init=1.0,
+                                      target_entropy=self.rl_target_entropy)
         self.rl_loss_module.make_value_estimator(
             gamma=0.99,
             average_rewards=self.reward_type == 'autonorm'
@@ -113,14 +110,14 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
 
         self.real_train_step = 0
 
-        self.reward_norm = None
-        if self.reward_type == 'batch-normalised':
-            self.reward_norm = torch.nn.SyncBatchNorm(1, track_running_stats=False)
-
         self.teacher_model = None
-        if self.use_distilled_targets:
-            self.teacher_model = mae_vit_base_patch16(img_size=datamodule.image_size, with_decoder=False)
-            self.load_teacher('deit_3_base_224_21k.pth')
+        if self.teacher_path is not None:
+            self.teacher_model = {
+                'small': mae_vit_small_patch16,
+                'base': mae_vit_base_patch16,
+                'large': mae_vit_large_patch16
+            }[backbone_size](img_size=datamodule.image_size, with_decoder=False)
+            self.load_teacher(teacher_path)
             for p in self.teacher_model.parameters():
                 p.requires_grad = False
             self.teacher_model = torch.compile(self.teacher_model, mode='reduce-overhead')
@@ -201,7 +198,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                             help='reward type selection',
                             type=str,
                             default='diff',
-                            choices=['diff', 'simple', 'batch-normalised', 'autonorm'])
+                            choices=['diff', 'simple', 'autonorm'])
         parser.add_argument('--early-stop-threshold',
                             help='exploration early stop score threshold',
                             type=float,
@@ -214,16 +211,10 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                             help='target entropy for SAC algorithm',
                             type=float,
                             default=None)
-        parser.add_argument('--use-distilled-targets',
-                            help='use distilled targets by running the model on full image',
-                            type=bool,
-                            default=False,
-                            action=argparse.BooleanOptionalAction)
-        parser.add_argument('--use-popart',
-                            help='use popart normalization',
-                            type=bool,
-                            default=False,
-                            action=argparse.BooleanOptionalAction)
+        parser.add_argument('--teacher-path',
+                            help='use distilled targets by running a model on full image',
+                            type=str,
+                            default=None)
         return parent_parser
 
     def configure_optimizers(self):
@@ -558,7 +549,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         game_idx: int
         env_state, game_idx = batch
 
-        if self.use_distilled_targets and env_state.current_glimpse == 0:
+        if self.teacher_model is not None and env_state.current_glimpse == 0:
             self.teacher_step(env_state, game_idx)
 
         next_state, step, backbone_loss = self.forward_game_state(env_state, mode='train',
@@ -603,8 +594,6 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                 state['next', 'reward'] = state['next', 'score']
             elif self.reward_type == 'diff':
                 state['next', 'reward'] = state['next', 'score'] - state['score']
-            elif self.reward_type == 'batch-normalised':
-                state['next', 'reward'] = self.reward_norm(state['next', 'score'].unsqueeze(-1)).squeeze(-1)
             else:
                 assert False
 
@@ -695,7 +684,7 @@ class ClassificationRlMAE(BaseRlMAE):
 
     # autograd_backbone = False
 
-    def __init__(self, *args, patch_mix_alpha: float = 1.0, patch_mix_prob: float = 1.0, **kwargs) -> None:
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
         assert isinstance(self.datamodule, BaseClassificationDataModule)
@@ -710,26 +699,6 @@ class ClassificationRlMAE(BaseRlMAE):
                                    num_classes=self.datamodule.cls_num_classes,
                                    average='micro'))
 
-        # self.patch_mix = InPlacePatchMix(
-        #     patch_mix_alpha=patch_mix_alpha,
-        #     prob=patch_mix_prob,
-        #     num_classes=self.datamodule.num_classes
-        # )
-
-    @classmethod
-    def add_argparse_args(cls, parent_parser):
-        parent_parser = super().add_argparse_args(parent_parser)
-        parser = parent_parser.add_argument_group(ClassificationRlMAE.__name__)
-        parser.add_argument('--patch-mix-alpha',
-                            help='patch mix alpha',
-                            type=float,
-                            default=1.0)
-        parser.add_argument('--patch-mix-prob',
-                            help='patch mix probability',
-                            type=float,
-                            default=1.0)
-        return parent_parser
-
     @staticmethod
     def _copy_target_tensor_fn(target: torch.Tensor, batch: Dict[str, torch.Tensor]):
         target[:batch['label'].shape[0]].copy_(batch['label'])
@@ -737,16 +706,6 @@ class ClassificationRlMAE(BaseRlMAE):
     @staticmethod
     def _create_target_tensor_fn(batch_size: int):
         return torch.zeros(batch_size, dtype=torch.long)
-
-    # def backbone_training_step(self, optimizer_backbone, backbone_loss, env_state: SharedMemory):
-    #     target = self.patch_mix(env_state)
-    #
-    #     latent, pos_embed = self.mae.forward_encoder(env_state.current_patches, coords=env_state.current_coords,
-    #                                                  pad_mask=env_state.current_mask)
-    #     out = self.mae.forward_head(latent)
-    #     loss = self.loss_fn(out, target)
-    #
-    #     super().backbone_training_step(optimizer_backbone, loss.mean(), env_state)
 
     def _forward_task(self, state: SharedMemory, latent: torch.Tensor, is_done: bool, with_loss_and_grad: bool,
                       mode: str, distilled_target: Optional[torch.Tensor] = None):
@@ -776,7 +735,7 @@ class ClassificationRlMAE(BaseRlMAE):
                 score_target = out.argmax(dim=-1)
             score = torch.nn.functional.softmax(out, dim=-1)
             score = score[torch.arange(score.shape[0]), score_target]
-            score = score * 10
+            score = score
             loss = self.loss_fn(out, true_target)
 
         return out, loss, score.reshape(score.shape[0], 1)
