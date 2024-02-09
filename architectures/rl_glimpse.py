@@ -405,7 +405,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
     def forward_game_state(self, env_state: SharedMemory, mode: str, distilled_target: Optional[torch.Tensor] = None):
         is_done = env_state.is_done
         with_loss_and_grad = mode == 'train' and is_done
-        with nullcontext() if self.autograd_backbone and with_loss_and_grad else torch.no_grad():
+        with (nullcontext() if self.autograd_backbone and with_loss_and_grad else torch.no_grad()):
             step = env_state.current_glimpse
             latent, pos_embed = self.mae.forward_encoder(env_state.current_patches, coords=env_state.current_coords,
                                                          pad_mask=env_state.current_mask,
@@ -431,8 +431,14 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
 
             observation.detach_()
 
-            if not is_done and self.early_stop_threshold is not None:
-                env_state.done = torch.logical_or(env_state.done, torch.ge(score, self.early_stop_threshold))
+            if self.early_stop_threshold is not None:
+                if not is_done:
+                    env_state.done = torch.logical_or(env_state.done, torch.ge(score, self.early_stop_threshold))
+                else:
+                    avg_steps_taken = (env_state.all_mask.shape[1] - env_state.all_mask.sum(dim=1)
+                                       ).mean() / self.glimpse_grid_size ** 2
+                    self.log(name=f'{mode}/avg_steps', value=avg_steps_taken.item(), on_step=True,
+                             on_epoch=True, batch_size=score.shape[0])
 
         done = env_state.done.clone()
 
