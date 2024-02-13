@@ -3,10 +3,35 @@ import argparse
 import os
 import sys
 from argparse import ArgumentParser
+from typing import Dict, Any
 
 from lightning import LightningDataModule
 from lightning.pytorch.utilities.types import TRAIN_DATALOADERS, EVAL_DATALOADERS
-from torch.utils.data import RandomSampler, DataLoader
+from torch.utils.data import RandomSampler, DataLoader, Dataset
+
+
+class DatasetWrapper(Dataset):
+    def __init__(self, dataset):
+        self.dataset = dataset
+        self.patch_sampler = None
+
+    def set_patch_sampler(self, sampler):
+        self.patch_sampler = sampler
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, index: int) -> Dict[str, Any]:
+        batch = self.dataset[index]
+
+        if self.patch_sampler is None:
+            return batch
+        else:
+            patches, coords = self.patch_sampler(batch['image'])
+            return batch | {
+                "patches": patches,
+                "coords": coords,
+            }
 
 
 class BaseDataModule(LightningDataModule, abc.ABC):
@@ -76,10 +101,14 @@ class BaseDataModule(LightningDataModule, abc.ABC):
         return parent_parser
 
     def train_dataloader(self, sampler=None) -> TRAIN_DATALOADERS:
+        if not hasattr(self.train_dataset, 'patch_sampler'):
+            self.train_dataset = DatasetWrapper(self.train_dataset)
+
         print(f'Loaded {len(self.train_dataset)} train samples', file=sys.stderr)
         if self.num_samples is not None:
             sampler = RandomSampler(self.train_dataset, replacement=True, num_samples=self.num_samples)
-        return DataLoader(self.train_dataset, batch_size=self.train_batch_size, num_workers=self.num_workers,
+        return DataLoader(self.train_dataset, batch_size=self.train_batch_size,
+                          num_workers=self.num_workers,
                           sampler=sampler, shuffle=None if sampler is not None else True, drop_last=True,
                           pin_memory=True)
 
@@ -100,7 +129,7 @@ class BaseDataModule(LightningDataModule, abc.ABC):
                           drop_last=self.always_drop_last)
 
     def _load_to_memfs(self):
-        raise NotImplementedError()
+        raise TypeError()
 
     def prepare_data(self) -> None:
         if self.mem_fs:

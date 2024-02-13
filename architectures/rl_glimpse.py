@@ -2,7 +2,7 @@ import sys
 from abc import ABC, abstractmethod
 from contextlib import nullcontext
 from functools import partial
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 
 import torch
 import torchmetrics
@@ -22,6 +22,8 @@ from architectures.rl.transformer_actor_critic import TransformerActorCritic
 from architectures.utils import MetricMixin, RevNormalizer, filter_checkpoint
 from datasets.base import BaseDataModule
 from datasets.classification import BaseClassificationDataModule
+from datasets.patch_sampler import PretrainingSampler
+from datasets.segmentation import BaseSegmentationDataModule
 
 
 class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
@@ -29,6 +31,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
     checkpoint_metric = None
     autograd_backbone = True
     needs_decoder = True
+    decoder_out_channels = 3
 
     def __init__(self, datamodule: BaseDataModule, backbone_size='base', pretrained_mae_path=None, num_glimpses=14,
                  max_glimpse_size_ratio=1.0, glimpse_grid_size=2, rl_iters_per_step=1, epochs=100,
@@ -36,7 +39,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                  lr=3e-4, backbone_lr=1e-5, parallel_games=2, backbone_training_type: str = 'constant',
                  rl_loss_function: str = 'smooth_l1', glimpse_size_penalty: float = 0., reward_type='diff',
                  early_stop_threshold=None, extract_latent_layer=None, rl_target_entropy=None,
-                 teacher_path=None, **_) -> None:
+                 teacher_path=None, pretraining_epochs=0, **_) -> None:
         super().__init__()
 
         self.steps_per_epoch = None
@@ -45,7 +48,8 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         self.glimpse_grid_size = glimpse_grid_size
         self.rl_iters_per_step = rl_iters_per_step
         self.rl_batch_size = rl_batch_size
-        self.epochs = epochs
+        self.epochs = epochs - pretraining_epochs
+        self.pretraining_epochs = pretraining_epochs
         self.init_random_batches = init_random_batches
         self.freeze_backbone_epochs = freeze_backbone_epochs
         self.lr = lr
@@ -69,7 +73,8 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
             'small': mae_vit_small_patch16,
             'base': mae_vit_base_patch16,
             'large': mae_vit_large_patch16
-        }[backbone_size](img_size=datamodule.image_size, out_chans=3, with_decoder=self.needs_decoder)
+        }[backbone_size](img_size=datamodule.image_size, out_chans=self.decoder_out_channels,
+                         with_decoder=self.needs_decoder)
         # noinspection PyTypeChecker
         self.mae: MaskedAutoencoderViT = torch.compile(self.mae, mode='reduce-overhead')
 
@@ -109,13 +114,17 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
 
         self.real_train_step = 0
 
-        self.teacher_model = None
+        self.teacher_model: Optional[MaskedAutoencoderViT] = None
         if self.teacher_path is not None:
             self.teacher_model = mae_vit_base_patch16(img_size=datamodule.image_size, with_decoder=False)
             self.load_teacher(teacher_path)
             for p in self.teacher_model.parameters():
                 p.requires_grad = False
-            self.teacher_model = torch.compile(self.teacher_model, mode='reduce-overhead')
+            # noinspection PyTypeChecker
+            self.teacher_model: MaskedAutoencoderViT = torch.compile(self.teacher_model, mode='reduce-overhead')
+
+        self.pretraining_sampler = PretrainingSampler(max_glimpses=self.num_glimpses,
+                                                      glimpse_size=self.glimpse_grid_size)
 
     @classmethod
     def add_argparse_args(cls, parent_parser):
@@ -210,6 +219,10 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                             help='use distilled targets by running a model on full image',
                             type=str,
                             default=None)
+        parser.add_argument('--pretraining-epochs',
+                            help='number of pretraining epochs',
+                            type=int,
+                            default=0)
         return parent_parser
 
     def configure_optimizers(self):
@@ -303,6 +316,9 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         else:
             raise ValueError("Unable to parse pretrained model checkpoint")
         del checkpoint['_orig_mod.pos_embed']
+        if checkpoint['_orig_mod.decoder_pred.weight'].shape != self.mae.decoder_pred.weight.shape:
+            del checkpoint['_orig_mod.decoder_pred.weight']
+            del checkpoint['_orig_mod.decoder_pred.bias']
         print(self.mae.load_state_dict(checkpoint, strict=False), file=sys.stderr)
 
     def load_pretrained(self, path=""):
@@ -320,7 +336,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         pass
 
     @staticmethod
-    def _create_target_tensor_fn(batch_size: int):
+    def _create_target_tensor_fn(batch_size: int, image_size: Tuple[int, int]):
         return torch.zeros((batch_size, 0))
 
     def train_dataloader(self) -> TRAIN_DATALOADERS:
@@ -392,8 +408,8 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         self.replay_buffer.empty()
 
     @abstractmethod
-    def _forward_task(self, state: SharedMemory, latent: torch.Tensor, is_done: bool, with_loss_and_grad: bool,
-                      mode: str, distilled_target: Optional[torch.Tensor] = None):
+    def _forward_task(self, images: torch.Tensor, targets: torch.Tensor, latent: torch.Tensor, is_done: bool,
+                      with_loss_and_grad: bool, mode: str, distilled_target: Optional[torch.Tensor] = None):
         """This function implements the task-specific forward pass of the model, including computing the loss value,
         score for RL training, as well as logging any task-specific metrics."""
         raise NotImplementedError()
@@ -407,8 +423,8 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                                                          pad_mask=env_state.current_mask,
                                                          aux_latent_layer=self.extract_latent_layer)
 
-            out, loss, score = self._forward_task(env_state, latent, is_done, with_loss_and_grad, mode,
-                                                  distilled_target)
+            out, loss, score = self._forward_task(env_state.images, env_state.target, latent, is_done,
+                                                  with_loss_and_grad, mode, distilled_target)
 
             if self.extract_latent_layer is not None:
                 latent = self.mae.aux_latent
@@ -526,7 +542,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         self.log(name='train/alpha_loss', value=sum(alpha_losses) / len(alpha_losses), on_step=True, on_epoch=False,
                  batch_size=batch_size)
 
-    def backbone_training_step(self, optimizer_backbone, backbone_loss, env_state):
+    def backbone_training_step(self, optimizer_backbone, backbone_loss):
         optimizer_backbone.zero_grad()
         self.manual_backward(backbone_loss)
         optimizer_backbone.step()
@@ -538,7 +554,32 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         out = self.teacher_model.forward_head(latent)
         self.distillation_targets[game_idx] = out.clone().detach()
 
+    def pretraining_step(self, batch, mode):
+        if mode == 'train':
+            latent, pos_embed = self.mae.forward_encoder(batch['patches'], coords=batch['coords'])
+        else:
+            latent, pos_embed = self.mae.forward_encoder(batch['image'])
+        _, backbone_loss, _ = self._forward_task(batch['image'], batch.get('mask', None), latent,
+                                                 is_done=True, with_loss_and_grad=True, mode=mode,
+                                                 distilled_target=None)
+        if mode == 'train':
+            optimizer_actor, optimizer_critic, optimizer_alpha, optimizer_backbone = self.optimizers()
+            self.backbone_training_step(optimizer_backbone, backbone_loss)
+
+    def on_train_epoch_start(self) -> None:
+        pretrain = self.current_epoch < self.pretraining_epochs
+        self.engine.set_passthrough(pretrain)
+        self.datamodule.train_dataset.set_patch_sampler(self.pretraining_sampler if pretrain else None)
+
+    def on_validation_epoch_start(self) -> None:
+        pretrain = self.current_epoch < self.pretraining_epochs
+        self.engine.set_passthrough(pretrain)
+
     def training_step(self, batch, batch_idx: int):
+        if self.current_epoch < self.pretraining_epochs:
+            self.pretraining_step(batch, 'train')
+            return
+
         scheduler_actor, scheduler_critic, scheduler_alpha, scheduler_backbone = self.lr_schedulers()
         scheduler_actor.step()
         scheduler_critic.step()
@@ -610,9 +651,13 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
             self.rl_training_step(optimizer_actor, optimizer_critic, optimizer_alpha, env_state.current_batch_size)
 
         if self.is_backbone_training_enabled and is_done:
-            self.backbone_training_step(optimizer_backbone, backbone_loss, env_state)
+            self.backbone_training_step(optimizer_backbone, backbone_loss)
 
     def inference_step(self, batch, batch_idx, mode):
+        if self.current_epoch < self.pretraining_epochs:
+            self.pretraining_step(batch, 'val')
+            return
+
         env_state: SharedMemory
         game_idx: int
         env_state, game_idx = batch
@@ -664,6 +709,11 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         self.rl_loss_module.qvalue_network_params._load_from_state_dict = stub
         self.rl_loss_module.target_qvalue_network_params._load_from_state_dict = stub
 
+        self.real_train_step = checkpoint.get('real_train_step', 0)
+
+    def on_save_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
+        checkpoint['real_train_step'] = self.real_train_step
+
 
 class ReconstructionRlMAE(BaseRlMAE):
     checkpoint_metric = 'val/rmse'
@@ -674,16 +724,16 @@ class ReconstructionRlMAE(BaseRlMAE):
         self.rev_normalizer = RevNormalizer()
         self.define_metric('rmse', partial(torchmetrics.MeanSquaredError, squared=False))
 
-    def _forward_task(self, state: SharedMemory, latent: torch.Tensor, is_done: bool, with_loss_and_grad: bool,
-                      mode: str, distilled_target: Optional[torch.Tensor] = None):
+    def _forward_task(self, images: torch.Tensor, targets: torch.Tensor, latent: torch.Tensor, is_done: bool,
+                      with_loss_and_grad: bool, mode: str, distilled_target: Optional[torch.Tensor] = None):
         out = self.mae.forward_decoder(latent)
         loss = None
         if with_loss_and_grad:
-            loss = self.mae.forward_reconstruction_loss(state.images, out)
+            loss = self.mae.forward_reconstruction_loss(images, out)
 
         pred = self.mae.unpatchify(out)
         pred = self.rev_normalizer(pred)
-        target = self.rev_normalizer(state.images)
+        target = self.rev_normalizer(images)
         score = -torch.sqrt(
             torch.nn.functional.mse_loss(pred, target, reduce=False)
             .reshape(pred.shape[0], -1)
@@ -723,14 +773,14 @@ class ClassificationRlMAE(BaseRlMAE):
         target[:batch['label'].shape[0]].copy_(batch['label'])
 
     @staticmethod
-    def _create_target_tensor_fn(batch_size: int):
+    def _create_target_tensor_fn(batch_size: int, image_size: Tuple[int, int]):
         return torch.zeros(batch_size, dtype=torch.long)
 
-    def _forward_task(self, state: SharedMemory, latent: torch.Tensor, is_done: bool, with_loss_and_grad: bool,
-                      mode: str, distilled_target: Optional[torch.Tensor] = None):
+    def _forward_task(self, images: torch.Tensor, targets: torch.Tensor, latent: torch.Tensor, is_done: bool,
+                      with_loss_and_grad: bool, mode: str, distilled_target: Optional[torch.Tensor] = None):
         out = self.mae.forward_head(latent)
 
-        true_target = state.target
+        true_target = targets
 
         if is_done:
             self.log_metric(mode, 'accuracy', out.detach(), true_target, on_epoch=True, batch_size=latent.shape[0])
@@ -756,5 +806,61 @@ class ClassificationRlMAE(BaseRlMAE):
             score = score[torch.arange(score.shape[0]), score_target]
             score = score
             loss = self.loss_fn(out, true_target)
+
+        return out, loss, score.reshape(score.shape[0], 1)
+
+
+class SegmentationRlMAE(BaseRlMAE):
+    checkpoint_metric = 'val/mPA'
+    checkpoint_metric_mode = 'max'
+
+    def __init__(self, datamodule: BaseDataModule, *args, **kwargs) -> None:
+        assert isinstance(datamodule, BaseSegmentationDataModule)
+        self.num_classes = datamodule.num_classes
+        self.decoder_out_channels = self.num_classes
+        self.ignore_label = datamodule.ignore_label
+
+        super().__init__(datamodule, *args, **kwargs)
+
+        self.define_metric('mPA', partial(torchmetrics.classification.MulticlassAccuracy,
+                                          num_classes=self.num_classes,
+                                          ignore_index=self.ignore_label,
+                                          average='macro',
+                                          multidim_average='global'))
+        self.define_metric('PA', partial(torchmetrics.classification.MulticlassAccuracy,
+                                         num_classes=self.num_classes,
+                                         ignore_index=self.ignore_label,
+                                         average='micro',
+                                         multidim_average='global'))
+        self.define_metric('mIoU', partial(torchmetrics.classification.MulticlassJaccardIndex,
+                                           num_classes=self.num_classes,
+                                           ignore_index=self.ignore_label,
+                                           average='macro'))
+
+        self.loss_fn = torch.nn.CrossEntropyLoss(reduction='none', ignore_index=self.ignore_label)
+
+    @staticmethod
+    def _copy_target_tensor_fn(target: torch.Tensor, batch: Dict[str, torch.Tensor]):
+        target[:batch['mask'].shape[0]].copy_(batch['mask'])
+
+    @staticmethod
+    def _create_target_tensor_fn(batch_size: int, image_size: Tuple[int, int]):
+        return torch.zeros((batch_size, image_size[0], image_size[1]), dtype=torch.long)
+
+    def _forward_task(self, images: torch.Tensor, targets: torch.Tensor, latent: torch.Tensor, is_done: bool,
+                      with_loss_and_grad: bool, mode: str, distilled_target: Optional[torch.Tensor] = None):
+        out = self.mae.forward_decoder(latent)
+        out = self.mae.unpatchify(out)
+        pred = out.argmax(dim=1).detach()
+
+        loss = self.loss_fn(out, targets).mean(dim=-1).mean(dim=-1)
+
+        if is_done:
+            self.log_metric(mode, 'mPA', pred, targets, on_epoch=True, batch_size=latent.shape[0])
+            self.log_metric(mode, 'PA', pred, targets, on_epoch=True, batch_size=latent.shape[0])
+            self.log_metric(mode, 'mIoU', pred, targets, on_epoch=True, batch_size=latent.shape[0])
+
+        score = -loss
+        loss = loss.mean()
 
         return out, loss, score.reshape(score.shape[0], 1)

@@ -19,9 +19,9 @@ cd $SLURM_SUBMIT_DIR
 
 source $SCRATCH/conda/etc/profile.d/conda.sh
 
-export NCCL_DEBUG=INFO
-export PYTHONFAULTHANDLER=1
+#export NCCL_DEBUG=INFO
+#export PYTHONFAULTHANDLER=1
 
 conda activate wtln3
 
-srun python train.py ImageNet1k ClassificationRlMAE --data-dir $SCRATCH/imagenet --mem-fs --wandb --train-batch-size 128 --eval-batch-size 128 --rl-batch-size 128  --num-workers 8 --parallel-games 0 --num-glimpses 14 --pretrained-mae-path elastic_base.pth --replay-buffer-size 20000 --glimpse-grid-size 2
+srun python train.py ImageNet1k ClassificationRlMAE --data-dir $SCRATCH/imagenet --mem-fs --wandb --train-batch-size 256 --eval-batch-size 256 --rl-batch-size 256  --num-workers 8 --parallel-games 0 --num-glimpses 14 --pretrained-mae-path elastic_base.pth --replay-buffer-size 20000 --glimpse-grid-size 2

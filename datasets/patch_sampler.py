@@ -80,6 +80,25 @@ class RandomUniformSampler(SimplePatchSampler):
         return zip(ys, xs, sizes)
 
 
+class PretrainingSampler(SimplePatchSampler):
+    def __init__(self, max_glimpses, glimpse_size, min_patch_size=16, max_patch_size=56, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.max_glimpses = max_glimpses
+        self.glimpse_size = glimpse_size
+        self.min_patch_size = min_patch_size
+        self.max_patch_size = max_patch_size
+
+    def _get_coordinates(self, img_size, img):
+        sizes = self.rng.integers(self.min_patch_size,
+                                  self.max_patch_size,
+                                  size=(self.max_glimpses - 1) * (self.glimpse_size ** 2))
+        sizes = np.concatenate((np.asarray([224 // self.glimpse_size] * (self.glimpse_size ** 2)), sizes))
+        sizes = sizes.astype(np.int64)
+        ys = self.rng.integers(0, img_size[0] - sizes)
+        xs = self.rng.integers(0, img_size[1] - sizes)
+        return zip(ys, xs, sizes)
+
+
 class RandomDelegatedSampler(PatchSampler):
 
     def __init__(self, samplers: List[Tuple[PatchSampler, float]], patch_size=(16, 16), seed=1000000009):

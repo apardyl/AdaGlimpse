@@ -15,7 +15,8 @@ from architectures.rl.shared_memory import SharedMemory
 class BaseGlimpseEngine(ABC):
     def __init__(self, max_glimpses: int, glimpse_grid_size: int,
                  batch_size: int, image_size: Tuple[int, int], native_patch_size: Tuple[int, int],
-                 max_glimpse_size_ratio: float, device: torch.device, create_target_tensor_fn: Callable[[int], Tensor],
+                 max_glimpse_size_ratio: float, device: torch.device,
+                 create_target_tensor_fn: Callable[[int, Tuple[int, int]], Tensor],
                  copy_target_tensor_fn: Callable[[Tensor, Dict[str, Tensor]], None]) -> None:
         self.max_glimpses = max_glimpses
         self.glimpse_grid_size = glimpse_grid_size
@@ -25,6 +26,7 @@ class BaseGlimpseEngine(ABC):
         self.device = device
         self.create_target_tensor_fn = create_target_tensor_fn
         self.copy_target_tensor_fn = copy_target_tensor_fn
+        self.passthrough = False
 
         self.sampler = InteractiveStatelessSampler(
             glimpse_grid_size=self.glimpse_grid_size,
@@ -45,6 +47,9 @@ class BaseGlimpseEngine(ABC):
     def get_loader(self, dataloader) -> Iterable:
         raise NotImplementedError()
 
+    def set_passthrough(self, enabled: bool):
+        self.passthrough = enabled
+
 
 class SyncGlimpseEngine(BaseGlimpseEngine):
     class _GlimpseIterator:
@@ -53,6 +58,11 @@ class SyncGlimpseEngine(BaseGlimpseEngine):
             self.dataloader = dataloader
 
         def __iter__(self) -> Iterator[Tuple[SharedMemory, int]]:
+            if self.engine.passthrough:
+                for batch in self.dataloader:
+                    yield batch
+                return
+
             state = self.engine._build_shared_memory()
 
             for batch in self.dataloader:
@@ -63,6 +73,8 @@ class SyncGlimpseEngine(BaseGlimpseEngine):
                     yield state, 0
 
         def __len__(self) -> int:
+            if self.engine.passthrough:
+                return len(self.dataloader)
             return len(self.dataloader) * (self.engine.max_glimpses + 1)
 
     def get_loader(self, dataloader) -> Iterable:
@@ -140,6 +152,11 @@ class ParallelGlimpseEngine(BaseGlimpseEngine):
             self.dataloader = dataloader
 
         def __iter__(self) -> Iterator[Tuple[SharedMemory, int]]:
+            if self.engine.passthrough:
+                for batch in self.dataloader:
+                    yield batch
+                return
+
             if self.engine.games_playing > 0:
                 # wait for other games to finish.
                 sleep(1)
@@ -181,6 +198,8 @@ class ParallelGlimpseEngine(BaseGlimpseEngine):
                         self.engine.games_playing -= 1
 
         def __len__(self) -> int:
+            if self.engine.passthrough:
+                return len(self.dataloader)
             return len(self.dataloader) * (self.engine.max_glimpses + 1)
 
     def get_loader(self, dataloader) -> Iterable:

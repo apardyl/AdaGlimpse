@@ -14,7 +14,7 @@ class _SharedMemStruct(Structure):
 class SharedMemory:
     def __init__(self, max_glimpses: int, image_size: Tuple[int, int], native_patch_size: Tuple[int, int],
                  glimpse_grid_size: int, batch_size: int, device: torch.device,
-                 create_target_tensor_fn: Callable[[int], Tensor],
+                 create_target_tensor_fn: Callable[[int, Tuple[int, int]], Tensor],
                  copy_target_tensor_fn: Callable[[Tensor, Dict[str, Tensor]], None]):
         self._max_glimpses = max_glimpses
         self._glimpse_grid_size = glimpse_grid_size
@@ -28,7 +28,7 @@ class SharedMemory:
             "coords": torch.zeros((batch_size, self._max_patches, 4)),
             "mask": torch.ones((batch_size, self._max_patches, 1)),
             "action": torch.zeros((batch_size, 3)),
-            "target": create_target_tensor_fn(batch_size),
+            "target": create_target_tensor_fn(batch_size, image_size),
             "done": torch.zeros((batch_size, 1), dtype=torch.bool)
         }, batch_size=(), device=device)
 

@@ -262,36 +262,3 @@ class _GlimpseElasticMaeClassification(_GlimpseElasticMae, MetricMixin):
         self.log_metric(mode, 'accuracy', out['pred'], batch['label'])
 
 
-class SaliencyGlimpseCLSElasticMae(_GlimpseElasticMaeClassification):
-    selection_map_extractor_class = ElasticSaliencyMap
-    glimpse_selector_class = None
-
-    def __init__(self, datamodule: BaseDataModule, **kwargs):
-        super().__init__(datamodule, **kwargs)
-
-        self.patch_sampler_class = InteractiveSampler
-        self.extractor = self.selection_map_extractor_class(self)
-
-    def forward(self, batch, compute_loss=True):
-        image = batch['image']
-        sampler = self.patch_sampler_class(image)
-        selector = self.glimpse_selector_class(self, image)
-
-        for step in range(self.num_glimpses - 4):
-            selection_mask = self.extractor(sampler.patches, sampler.coords)
-            next_glimpse = selector(selection_mask, sampler.coords)
-            sampler.sample(next_glimpse)
-
-        latent = self.mae.forward_encoder(sampler.patches, coords=sampler.coords)
-        pred = self.mae.forward_head(latent)
-        loss = self.criterion(pred, batch['label'])
-
-        return {'pred': pred, 'loss': loss, 'coords': sampler.coords}
-
-
-class ClsStamlikeSaliencyGlimpseElasticMae(SaliencyGlimpseCLSElasticMae):
-    glimpse_selector_class = STAMLikeGlimpseSelector
-
-
-class ClsDivideFourSaliencyGlimpseElasticMae(SaliencyGlimpseCLSElasticMae):
-    glimpse_selector_class = DivideFourGlimpseSelector
