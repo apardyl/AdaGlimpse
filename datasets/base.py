@@ -121,6 +121,9 @@ class BaseDataModule(LightningDataModule, abc.ABC):
                           drop_last=self.always_drop_last)
 
     def val_dataloader(self, sampler=None) -> EVAL_DATALOADERS:
+        if not hasattr(self.val_dataset, 'patch_sampler'):
+            self.val_dataset = DatasetWrapper(self.val_dataset)
+
         print(f'Loaded {len(self.val_dataset)} val samples', file=sys.stderr)
         if self.num_random_eval_samples is not None:
             sampler = RandomSampler(self.val_dataset, replacement=True, num_samples=self.num_random_eval_samples)

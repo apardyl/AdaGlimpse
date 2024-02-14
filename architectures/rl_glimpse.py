@@ -1,3 +1,4 @@
+import argparse
 import sys
 from abc import ABC, abstractmethod
 from contextlib import nullcontext
@@ -39,7 +40,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                  lr=3e-4, backbone_lr=1e-5, parallel_games=2, backbone_training_type: str = 'constant',
                  rl_loss_function: str = 'smooth_l1', glimpse_size_penalty: float = 0., reward_type='diff',
                  early_stop_threshold=None, extract_latent_layer=None, rl_target_entropy=None,
-                 teacher_path=None, pretraining_epochs=0, **_) -> None:
+                 teacher_path=None, pretraining=False, **_) -> None:
         super().__init__()
 
         self.steps_per_epoch = None
@@ -48,8 +49,8 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         self.glimpse_grid_size = glimpse_grid_size
         self.rl_iters_per_step = rl_iters_per_step
         self.rl_batch_size = rl_batch_size
-        self.epochs = epochs - pretraining_epochs
-        self.pretraining_epochs = pretraining_epochs
+        self.epochs = epochs
+        self.pretraining = pretraining
         self.init_random_batches = init_random_batches
         self.freeze_backbone_epochs = freeze_backbone_epochs
         self.lr = lr
@@ -219,10 +220,11 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                             help='use distilled targets by running a model on full image',
                             type=str,
                             default=None)
-        parser.add_argument('--pretraining-epochs',
-                            help='number of pretraining epochs',
-                            type=int,
-                            default=0)
+        parser.add_argument('--pretraining',
+                            help='backbone pretraining mode (random action, disables rl)',
+                            type=bool,
+                            default=False,
+                            action=argparse.BooleanOptionalAction)
         return parent_parser
 
     def configure_optimizers(self):
@@ -340,9 +342,13 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         return torch.zeros((batch_size, 0))
 
     def train_dataloader(self) -> TRAIN_DATALOADERS:
+        if self.pretraining:
+            return self.train_loader
         return self.engine.get_loader(dataloader=self.train_loader)
 
     def val_dataloader(self) -> EVAL_DATALOADERS:
+        if self.pretraining:
+            return self.val_loader
         return self.engine.get_loader(dataloader=self.val_loader)
 
     def test_dataloader(self) -> EVAL_DATALOADERS:
@@ -393,8 +399,11 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
             image_size=self.datamodule.image_size,
             num_parallel_games=self.parallel_games,
             create_target_tensor_fn=self._create_target_tensor_fn,
-            copy_target_tensor_fn=self._copy_target_tensor_fn
+            copy_target_tensor_fn=self._copy_target_tensor_fn,
         )
+
+        self.datamodule.train_dataset.set_patch_sampler(self.pretraining_sampler if self.pretraining else None)
+        self.datamodule.val_dataset.set_patch_sampler(self.pretraining_sampler if self.pretraining else None)
 
     def on_train_start(self) -> None:
         super().on_train_start()
@@ -555,10 +564,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         self.distillation_targets[game_idx] = out.clone().detach()
 
     def pretraining_step(self, batch, mode):
-        if mode == 'train':
-            latent, pos_embed = self.mae.forward_encoder(batch['patches'], coords=batch['coords'])
-        else:
-            latent, pos_embed = self.mae.forward_encoder(batch['image'])
+        latent, pos_embed = self.mae.forward_encoder(batch['patches'], coords=batch['coords'])
         _, backbone_loss, _ = self._forward_task(batch['image'], batch.get('mask', None), latent,
                                                  is_done=True, with_loss_and_grad=True, mode=mode,
                                                  distilled_target=None)
@@ -566,17 +572,11 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
             optimizer_actor, optimizer_critic, optimizer_alpha, optimizer_backbone = self.optimizers()
             self.backbone_training_step(optimizer_backbone, backbone_loss)
 
-    def on_train_epoch_start(self) -> None:
-        pretrain = self.current_epoch < self.pretraining_epochs
-        self.engine.set_passthrough(pretrain)
-        self.datamodule.train_dataset.set_patch_sampler(self.pretraining_sampler if pretrain else None)
 
-    def on_validation_epoch_start(self) -> None:
-        pretrain = self.current_epoch < self.pretraining_epochs
-        self.engine.set_passthrough(pretrain)
+
 
     def training_step(self, batch, batch_idx: int):
-        if self.current_epoch < self.pretraining_epochs:
+        if self.pretraining:
             self.pretraining_step(batch, 'train')
             return
 
@@ -654,7 +654,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
             self.backbone_training_step(optimizer_backbone, backbone_loss)
 
     def inference_step(self, batch, batch_idx, mode):
-        if self.current_epoch < self.pretraining_epochs:
+        if self.pretraining:
             self.pretraining_step(batch, 'val')
             return
 
