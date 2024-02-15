@@ -2,9 +2,11 @@ import numpy as np
 import torch
 import torchvision.transforms.functional as F
 
-from torchvision.transforms.transforms import RandomAffine, RandomHorizontalFlip, ColorJitter, RandomCrop, Resize, RandomResizedCrop
+from torchvision.transforms.transforms import RandomAffine, RandomHorizontalFlip, ColorJitter, RandomCrop, Resize, \
+    RandomResizedCrop, RandomChoice
 from torchvision.transforms import InterpolationMode
 
+from datasets.three_augment import GrayScale, Solarization, GaussianBlur
 from datasets.utils import IMAGENET_MEAN, IMAGENET_STD
 
 
@@ -42,17 +44,28 @@ class ColorMaskJitter(ColorJitter):
         return image, target
 
 
+class RandomMaskImageChoice(RandomChoice):
+
+    def __init__(self, transforms, p=None):
+        super().__init__(transforms, p)
+
+    def __call__(self, image, target):
+        image = super().__call__(image)
+        return image, target
+
+
 class RandomMaskAffine(RandomAffine):
     """ Random affine transformation of the image and mask"""
 
-    def __init__(self, degrees, translate=None, scale=None, shear=None, interpolation=InterpolationMode.BICUBIC, fill=0):
+    def __init__(self, degrees, translate=None, scale=None, shear=None, interpolation=InterpolationMode.BICUBIC,
+                 fill=0):
         super().__init__(degrees, translate, scale, shear, interpolation, fill)
 
     def forward(self, image, target):
         img_size = image.size
         ret = self.get_params(self.degrees, self.translate, self.scale, self.shear, img_size)
         return F.affine(image, *ret, interpolation=self.interpolation, fill=self.fill), \
-               F.affine(target, *ret, interpolation=InterpolationMode.NEAREST, fill=self.fill)
+            F.affine(target, *ret, interpolation=InterpolationMode.NEAREST, fill=self.fill)
 
 
 class RandomMaskCrop(RandomCrop):
@@ -106,7 +119,9 @@ class RandomMaskResizedCrop(RandomResizedCrop):
 
     def __call__(self, image, target):
         i, j, h, w = self.get_params(image, self.scale, self.ratio)
-        return F.resized_crop(image, i, j, h, w, self.size, self.interpolation), F.resized_crop(target, i, j, h, w, self.size, InterpolationMode.NEAREST)
+        return F.resized_crop(image, i, j, h, w, self.size, self.interpolation), F.resized_crop(target, i, j, h, w,
+                                                                                                self.size,
+                                                                                                InterpolationMode.NEAREST)
 
 
 class MaskNormalize:
@@ -130,10 +145,13 @@ def get_aug_seg_transforms(img_size):
     return MaskCompose([
         RandomMaskHorizontalFlip(0.5),
         RandomMaskAffine(10, (0.05, 0.05), scale=(1.0, 1.0), shear=(5, 5), interpolation=InterpolationMode.BICUBIC),
-        ColorMaskJitter(0.3, 0.3, 0.05, 0.05),
+        ColorMaskJitter(0.3, 0.3, 0.3),
         # RandomMaskCrop((IMG_SIZE[1], IMG_SIZE[0]), pad_if_needed=True),
-        MaskResize(img_size),
-        # RandomMaskResizedCrop(img_size, scale=(0.08, 1.0), ratio=(1.0, 3.0)),
+        # MaskResize(img_size),
+        RandomMaskResizedCrop(img_size, scale=(0.08, 1.0)),
+        RandomMaskImageChoice([GrayScale(p=1.0),
+                               Solarization(p=1.0),
+                               GaussianBlur(p=1.0)]),
         MaskToTensor(),
         MaskNormalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)
     ])
@@ -145,4 +163,3 @@ def get_seg_transforms(img_size):
         MaskToTensor(),
         MaskNormalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)
     ])
-

@@ -71,7 +71,7 @@ def main():
 
     callbacks = [
         ModelCheckpoint(dirpath=f"checkpoints/{run_name}", monitor=model.checkpoint_metric,
-                        mode=model.checkpoint_metric_mode, save_last=True),
+                        mode=model.checkpoint_metric_mode, save_last=True, save_top_k=1, every_n_epochs=1),
         RichProgressBar(leave=True, theme=RichProgressBarTheme(metrics_format='.2e')),
         RichModelSummary(max_depth=3),
         LearningRateMonitor(logging_interval='step')

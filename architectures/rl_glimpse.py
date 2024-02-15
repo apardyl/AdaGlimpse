@@ -40,7 +40,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                  lr=3e-4, backbone_lr=1e-5, parallel_games=2, backbone_training_type: str = 'constant',
                  rl_loss_function: str = 'smooth_l1', glimpse_size_penalty: float = 0., reward_type='diff',
                  early_stop_threshold=None, extract_latent_layer=None, rl_target_entropy=None,
-                 teacher_path=None, pretraining=False, **_) -> None:
+                 teacher_path=None, pretraining=False, pretrained_checkpoint=None, **_) -> None:
         super().__init__()
 
         self.steps_per_epoch = None
@@ -127,6 +127,9 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         self.pretraining_sampler = PretrainingSampler(max_glimpses=self.num_glimpses,
                                                       glimpse_size=self.glimpse_grid_size)
 
+        if pretrained_checkpoint is not None:
+            self.load_pretrained(pretrained_checkpoint)
+
     @classmethod
     def add_argparse_args(cls, parent_parser):
         parser = parent_parser.add_argument_group(BaseRlMAE.__name__)
@@ -144,6 +147,10 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                             default=1e-5)
         parser.add_argument('--pretrained-mae-path',
                             help='path to pretrained MAE weights',
+                            type=str,
+                            default=None)
+        parser.add_argument("--pretrained-checkpoint",
+                            help='path to a saved model state to load (only loads weights, does not resume training)',
                             type=str,
                             default=None)
         parser.add_argument('--epochs',
@@ -326,8 +333,12 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
     def load_pretrained(self, path=""):
         checkpoint = torch.load(path, map_location='cpu')
         checkpoint = checkpoint["state_dict"]
-        self.mae.load_state_dict(filter_checkpoint(checkpoint, 'mae.'), strict=True)
         self.actor_critic.load_state_dict(filter_checkpoint(checkpoint, 'actor_critic.'), strict=True)
+        self._restore_rl(checkpoint)
+        if checkpoint['mae._orig_mod.decoder_pred.weight'].shape != self.mae.decoder_pred.weight.shape:
+            del checkpoint['mae._orig_mod.decoder_pred.weight']
+            del checkpoint['mae._orig_mod.decoder_pred.bias']
+        print(self.mae.load_state_dict(filter_checkpoint(checkpoint, 'mae.'), strict=False))
 
     def load_teacher(self, path):
         checkpoint = torch.load(path, map_location='cpu')
@@ -572,9 +583,6 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
             optimizer_actor, optimizer_critic, optimizer_alpha, optimizer_backbone = self.optimizers()
             self.backbone_training_step(optimizer_backbone, backbone_loss)
 
-
-
-
     def training_step(self, batch, batch_idx: int):
         if self.pretraining:
             self.pretraining_step(batch, 'train')
@@ -691,13 +699,8 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
             with torch.no_grad():
                 self._user_forward_hook(*args, **kwargs)
 
-    def on_load_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
-        # manual restore RL state (workaround issue in torchrl)
-        state_dict = checkpoint['state_dict']
-        rl_state_dict = {}
-        for k in list(state_dict.keys()):
-            if k.startswith('rl_loss_module.'):
-                rl_state_dict[k[len('rl_loss_module.'):]] = state_dict[k]
+    def _restore_rl(self, state_dict):
+        rl_state_dict = filter_checkpoint(state_dict, 'rl_loss_module.')
         print(self.rl_loss_module.load_state_dict(rl_state_dict, strict=False))
 
         def stub(*args, **kwargs):
@@ -708,6 +711,11 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         self.rl_loss_module.actor_network_params._load_from_state_dict = stub
         self.rl_loss_module.qvalue_network_params._load_from_state_dict = stub
         self.rl_loss_module.target_qvalue_network_params._load_from_state_dict = stub
+
+    def on_load_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
+        # manual restore RL state (workaround issue in torchrl)
+        state_dict = checkpoint['state_dict']
+        self._restore_rl(state_dict)
 
         self.real_train_step = checkpoint.get('real_train_step', 0)
 
