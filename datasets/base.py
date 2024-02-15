@@ -110,7 +110,7 @@ class BaseDataModule(LightningDataModule, abc.ABC):
         return DataLoader(self.train_dataset, batch_size=self.train_batch_size,
                           num_workers=self.num_workers,
                           sampler=sampler, shuffle=None if sampler is not None else True, drop_last=True,
-                          pin_memory=True)
+                          pin_memory=True, persistent_workers=self.num_workers > 0)
 
     def test_dataloader(self, sampler=None) -> EVAL_DATALOADERS:
         print(f'Loaded {len(self.test_dataset)} test samples', file=sys.stderr)
@@ -118,7 +118,7 @@ class BaseDataModule(LightningDataModule, abc.ABC):
             sampler = RandomSampler(self.test_dataset, replacement=True, num_samples=self.num_random_eval_samples)
         return DataLoader(self.test_dataset, batch_size=self.eval_batch_size, sampler=sampler,
                           shuffle=self.force_shuffle, num_workers=self.num_workers, pin_memory=True,
-                          drop_last=self.always_drop_last)
+                          drop_last=self.always_drop_last, persistent_workers=self.num_workers > 0)
 
     def val_dataloader(self, sampler=None) -> EVAL_DATALOADERS:
         if not hasattr(self.val_dataset, 'patch_sampler'):
