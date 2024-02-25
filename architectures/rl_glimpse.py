@@ -868,7 +868,7 @@ class SegmentationRlMAE(BaseRlMAE):
             self.log_metric(mode, 'PA', pred, targets, on_epoch=True, batch_size=latent.shape[0])
             self.log_metric(mode, 'mIoU', pred, targets, on_epoch=True, batch_size=latent.shape[0])
 
-        score = -loss * 100  # scale to the same order of magnitude as reconstruction score
+        score = -loss
         loss = loss.mean()
 
         return out, loss, score.reshape(score.shape[0], 1)
