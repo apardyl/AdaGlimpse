@@ -396,6 +396,11 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                     sampler=DistributedSampler(self.datamodule.val_dataset))
             else:
                 self.val_loader = self.datamodule.val_dataloader()
+            if stage == 'fit':
+                self.datamodule.train_dataset.set_patch_sampler(
+                    self.pretraining_sampler if getattr(self, 'pretraining', False) else None)
+            self.datamodule.val_dataset.set_patch_sampler(
+                self.pretraining_sampler if getattr(self, 'pretraining', False) else None)
 
         if stage == 'test':
             self.test_loader = self.datamodule.test_dataloader()
@@ -412,9 +417,6 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
             create_target_tensor_fn=self._create_target_tensor_fn,
             copy_target_tensor_fn=self._copy_target_tensor_fn,
         )
-
-        self.datamodule.train_dataset.set_patch_sampler(self.pretraining_sampler if self.pretraining else None)
-        self.datamodule.val_dataset.set_patch_sampler(self.pretraining_sampler if self.pretraining else None)
 
     def on_train_start(self) -> None:
         super().on_train_start()

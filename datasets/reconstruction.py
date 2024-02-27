@@ -66,12 +66,10 @@ class Sun360Reconstruction(BaseReconstructionDataModule):
         val_list = file_list[:len(file_list) // 10]
         train_list = file_list[len(file_list) // 10:]
 
-        if stage == 'fit':
+        if stage == 'fit' or stage == 'validate':
             self.train_dataset = ReconstructionDataset(file_list=train_list,
-                                                       transform=
-                                                       get_default_img_transform(self.image_size)
-                                                       if self.no_aug else
-                                                       get_default_aug_img_transform(self.image_size, scale=False))
+                                                       transform=get_default_aug_img_transform(self.image_size,
+                                                                                               scale=False))
             self.val_dataset = ReconstructionDataset(file_list=val_list,
                                                      transform=get_default_img_transform(self.image_size))
         else:
@@ -82,15 +80,12 @@ class ADE20KReconstruction(BaseReconstructionDataModule):
     has_test_data = False
 
     def setup(self, stage: Optional[str] = None) -> None:
-        train_dir = os.path.join(self.data_dir, 'train', 'images')
-        val_dir = os.path.join(self.data_dir, 'val', 'images')
+        train_dir = os.path.join(self.data_dir, 'images', 'training')
+        val_dir = os.path.join(self.data_dir, 'images', 'validation')
 
-        if stage == 'fit':
+        if stage == 'fit' or stage == 'validate':
             self.train_dataset = ReconstructionDataset(root_dir=train_dir,
-                                                       transform=
-                                                       get_default_img_transform(self.image_size)
-                                                       if self.no_aug else
-                                                       get_default_aug_img_transform(self.image_size))
+                                                       transform=get_default_aug_img_transform(self.image_size))
             self.val_dataset = ReconstructionDataset(root_dir=val_dir,
                                                      transform=get_default_img_transform(self.image_size))
         else:
