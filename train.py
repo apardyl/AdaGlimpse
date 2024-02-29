@@ -11,6 +11,7 @@ from lightning.pytorch.callbacks import ModelCheckpoint, RichProgressBar, RichMo
 from lightning.pytorch.callbacks.progress.rich_progress import RichProgressBarTheme
 from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
 from lightning.pytorch.strategies import DDPStrategy
+from lightning_fabric.plugins.environments import SLURMEnvironment
 
 from architectures.base import AutoconfigLightningModule
 from utils.prepare import experiment_from_args
@@ -69,6 +70,11 @@ def main():
     else:
         loggers.append(TensorBoardLogger(save_dir='logs/', name=run_name))
 
+    save_dir = 'checkpoints'
+    checkpoint_dir = os.path.join(save_dir, run_name)
+    root_dir = os.path.join(save_dir, os.environ.get('SLURM_JOBID', ''))
+    os.makedirs(root_dir, exist_ok=True)
+
     callbacks = [
         ModelCheckpoint(dirpath=f"checkpoints/{run_name}", monitor=model.checkpoint_metric,
                         mode=model.checkpoint_metric_mode, save_last=True, save_top_k=1, every_n_epochs=1),
@@ -107,7 +113,8 @@ def main():
                       num_nodes=num_nodes,
                       devices=devices,
                       precision=precision,
-                      use_distributed_sampler=not model.internal_data)
+                      use_distributed_sampler=not model.internal_data,
+                      default_root_dir=root_dir)
 
     if not model.internal_data:
         kwargs = {

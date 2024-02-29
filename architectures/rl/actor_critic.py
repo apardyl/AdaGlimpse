@@ -50,9 +50,13 @@ class AttentionPooling(nn.Module):
 
 
 class BaseAgentNet(nn.Module):
-    def __init__(self, input_dims: List[int], hidden_dim: int, norm_layer: nn.Module, patch_num: int):
+    def __init__(self, input_dims: List[int], hidden_dim: int, norm_layer: nn.Module, patch_num: int,
+                 exclude_inputs=None):
         super().__init__()
 
+        self.exclude_inputs = exclude_inputs
+        if self.exclude_inputs is not None:
+            input_dims = [x for idx, x in enumerate(input_dims) if idx not in self.exclude_inputs]
         self.input_dims = input_dims
         common_dim = 2 * hidden_dim // len(input_dims)
         self.patch_num = patch_num
@@ -70,8 +74,11 @@ class BaseAgentNet(nn.Module):
                                         norm_layer=norm_layer)
 
     def _base_forward(self, mask: torch.Tensor, *x: torch.Tensor):
-        assert len(x) == len(self.input_layers)
         x = list(x)
+        if self.exclude_inputs is not None:
+            x = [a for idx, a in enumerate(x) if idx not in self.exclude_inputs]
+
+        assert len(x) == len(self.input_layers)
 
         B = x[0].shape[0]
 
@@ -87,9 +94,9 @@ class BaseAgentNet(nn.Module):
 
 
 class ActorNet(BaseAgentNet):
-    def __init__(self, action_dim, norm_layer, hidden_dim, patch_num, embed_dim):
+    def __init__(self, action_dim, norm_layer, hidden_dim, patch_num, embed_dim, exclude_inputs=None):
         super().__init__(input_dims=[32, 1, 4, embed_dim], hidden_dim=hidden_dim, norm_layer=norm_layer,
-                         patch_num=patch_num)
+                         patch_num=patch_num, exclude_inputs=exclude_inputs)
 
         self.patch_net_conv = nn.Sequential(
             nn.Conv2d(3, 8, kernel_size=5, stride=1, padding=0),
@@ -110,7 +117,7 @@ class ActorNet(BaseAgentNet):
             NormalParamExtractor(scale_mapping="biased_softplus_0.5"),
         )
 
-    def forward(self, patches, attention, coords, mask: torch.Tensor, observation):
+    def forward(self, mask, patches, attention, coords, observation):
         patches = (self.patch_net_conv(patches.reshape(-1, 3, 16, 16))
                    .reshape(attention.shape[0], attention.shape[1], -1))
         observation = super()._base_forward(mask, patches, attention, coords, observation)
@@ -119,9 +126,9 @@ class ActorNet(BaseAgentNet):
 
 
 class QValueNet(BaseAgentNet):
-    def __init__(self, action_dim, norm_layer, hidden_dim, patch_num, embed_dim):
+    def __init__(self, action_dim, norm_layer, hidden_dim, patch_num, embed_dim, exclude_inputs=None):
         super().__init__(input_dims=[32, 1, 4, embed_dim], hidden_dim=hidden_dim, norm_layer=norm_layer,
-                         patch_num=patch_num)
+                         patch_num=patch_num, exclude_inputs=exclude_inputs)
 
         self.patch_net_conv = nn.Sequential(
             nn.Conv2d(3, 8, kernel_size=5, stride=1, padding=0),
@@ -147,7 +154,7 @@ class QValueNet(BaseAgentNet):
             nn.Linear(hidden_dim, 1),
         )
 
-    def forward(self, patches, attention, coords, action, mask, observation):
+    def forward(self, action, mask, patches, attention, coords, observation):
         patches = (self.patch_net_conv(patches.reshape(-1, 3, 16, 16))
                    .reshape(attention.shape[0], attention.shape[1], -1))
         observation = super()._base_forward(mask, patches, attention, coords, observation)
@@ -156,20 +163,30 @@ class QValueNet(BaseAgentNet):
         return observation
 
 
-class TransformerActorCritic(nn.Module):
+class ActorCritic(nn.Module):
     def __init__(self, action_dim=3, norm_layer=partial(nn.LayerNorm, eps=1e-6), embed_dim=768, hidden_dim=256,
-                 patch_num=14 * 4):
+                 patch_num=14 * 4, exclude_inputs=None):
         super().__init__()
+
+        if exclude_inputs is not None:
+            exclude_inputs = [
+                {
+                    "patches": 0,
+                    "attention": 1,
+                    "coords": 2,
+                    "observation": 3
+                }[e] for e in exclude_inputs
+            ]
 
         self.actor_net = ActorNet(
             action_dim=action_dim, norm_layer=norm_layer, hidden_dim=hidden_dim, patch_num=patch_num,
-            embed_dim=embed_dim
+            embed_dim=embed_dim, exclude_inputs=exclude_inputs
         )
 
         self.policy_module = ProbabilisticActor(
             module=TensorDictModule(
                 module=self.actor_net,
-                in_keys=["patches", "attention", "coords", "mask", "observation"],
+                in_keys=["mask", "patches", "attention", "coords", "observation"],
                 out_keys=["loc", "scale"]
             ),
             spec=BoundedTensorSpec(
@@ -189,10 +206,10 @@ class TransformerActorCritic(nn.Module):
 
         self.qvalue_net = QValueNet(
             action_dim=action_dim, norm_layer=norm_layer, hidden_dim=hidden_dim, patch_num=patch_num,
-            embed_dim=embed_dim
+            embed_dim=embed_dim, exclude_inputs=exclude_inputs
         )
 
         self.qvalue_module = ValueOperator(
             module=self.qvalue_net,
-            in_keys=["patches", "attention", "coords", "action", "mask", "observation"],
+            in_keys=["action", "mask", "patches", "attention", "coords", "observation"],
         )

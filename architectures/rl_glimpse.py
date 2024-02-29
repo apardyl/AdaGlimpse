@@ -19,7 +19,7 @@ from architectures.base import AutoconfigLightningModule
 from architectures.mae import MaskedAutoencoderViT, mae_vit_base_patch16, mae_vit_small_patch16, mae_vit_large_patch16
 from architectures.rl.glimpse_engine import glimpse_engine, BaseGlimpseEngine
 from architectures.rl.shared_memory import SharedMemory
-from architectures.rl.transformer_actor_critic import TransformerActorCritic
+from architectures.rl.actor_critic import ActorCritic
 from architectures.utils import MetricMixin, RevNormalizer, filter_checkpoint
 from datasets.base import BaseDataModule
 from datasets.classification import BaseClassificationDataModule
@@ -40,7 +40,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                  lr=3e-4, backbone_lr=1e-5, parallel_games=2, backbone_training_type: str = 'constant',
                  rl_loss_function: str = 'smooth_l1', glimpse_size_penalty: float = 0., reward_type='diff',
                  early_stop_threshold=None, extract_latent_layer=None, rl_target_entropy=None,
-                 teacher_path=None, pretraining=False, pretrained_checkpoint=None, **_) -> None:
+                 teacher_path=None, pretraining=False, pretrained_checkpoint=None, exclude_rl_inputs=None, **_) -> None:
         super().__init__()
 
         self.steps_per_epoch = None
@@ -79,8 +79,9 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         # noinspection PyTypeChecker
         self.mae: MaskedAutoencoderViT = torch.compile(self.mae, mode='reduce-overhead')
 
-        self.actor_critic = TransformerActorCritic(embed_dim=self.mae.patch_embed.embed_dim,
-                                                   patch_num=self.num_glimpses * (self.glimpse_grid_size ** 2))
+        self.actor_critic = ActorCritic(embed_dim=self.mae.patch_embed.embed_dim,
+                                        patch_num=self.num_glimpses * (self.glimpse_grid_size ** 2),
+                                        exclude_inputs=exclude_rl_inputs)
 
         if pretrained_mae_path is not None:
             self.load_pretrained_elastic(pretrained_mae_path)
@@ -94,7 +95,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                                       delay_actor=False,
                                       delay_qvalue=True,
                                       alpha_init=1.0,
-                                      target_entropy=self.rl_target_entropy)
+                                      target_entropy=self.rl_target_entropy, )
         self.rl_loss_module.make_value_estimator(
             gamma=0.99,
             average_rewards=self.reward_type == 'autonorm'
@@ -232,6 +233,11 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                             type=bool,
                             default=False,
                             action=argparse.BooleanOptionalAction)
+        parser.add_argument('--exclude-rl-inputs',
+                            help='exclude parts of the rl state for ablation study',
+                            type=str,
+                            action='extend',
+                            nargs='*')
         return parent_parser
 
     def configure_optimizers(self):
