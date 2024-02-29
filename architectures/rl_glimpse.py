@@ -331,7 +331,8 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         else:
             raise ValueError("Unable to parse pretrained model checkpoint")
         del checkpoint['_orig_mod.pos_embed']
-        if checkpoint['_orig_mod.decoder_pred.weight'].shape != self.mae.decoder_pred.weight.shape:
+        if '_orig_mod.decoder_pred.weight' in checkpoint and checkpoint[
+            '_orig_mod.decoder_pred.weight'].shape != self.mae.decoder_pred.weight.shape:
             del checkpoint['_orig_mod.decoder_pred.weight']
             del checkpoint['_orig_mod.decoder_pred.bias']
         print(self.mae.load_state_dict(checkpoint, strict=False), file=sys.stderr)
