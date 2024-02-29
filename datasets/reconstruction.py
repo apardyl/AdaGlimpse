@@ -14,7 +14,8 @@ class ReconstructionDataset(torch.utils.data.Dataset):
     def __init__(self, root_dir=None, file_list=None, transform=None):
         assert root_dir is not None or file_list is not None
         if root_dir is not None:
-            self.data = [os.path.join(root_dir, p) for p in os.listdir(root_dir)]
+            self.data = [os.path.join(root_dir, p) for p in os.listdir(root_dir) if
+                         os.path.isfile(os.path.join(root_dir, p))]
         else:
             self.data = file_list
 

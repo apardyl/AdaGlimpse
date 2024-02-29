@@ -335,7 +335,8 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         checkpoint = checkpoint["state_dict"]
         self.actor_critic.load_state_dict(filter_checkpoint(checkpoint, 'actor_critic.'), strict=True)
         self._restore_rl(checkpoint)
-        if checkpoint['mae._orig_mod.decoder_pred.weight'].shape != self.mae.decoder_pred.weight.shape:
+        if 'mae._orig_mod.decoder_pred.weight' in checkpoint and checkpoint[
+            'mae._orig_mod.decoder_pred.weight'].shape != self.mae.decoder_pred.weight.shape:
             del checkpoint['mae._orig_mod.decoder_pred.weight']
             del checkpoint['mae._orig_mod.decoder_pred.bias']
         print(self.mae.load_state_dict(filter_checkpoint(checkpoint, 'mae.'), strict=False))

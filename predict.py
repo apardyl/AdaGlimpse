@@ -1,3 +1,4 @@
+import argparse
 import os.path
 import random
 import sys
@@ -42,6 +43,13 @@ def define_args(parent_parser):
         help='sample random images from the dataset',
         type=int,
         default=None
+    )
+    parser.add_argument(
+        "--save-all",
+        help='save all visualisation elements',
+        type=bool,
+        default=False,
+        action=argparse.BooleanOptionalAction
     )
     return parent_parser
 
@@ -134,13 +142,19 @@ class GridField:
 class ImageGridField(GridField):
     size_ratio = 3.5
 
-    def render(self, axs):
+    def __init__(self, data):
+        super().__init__(data)
         if len(self.data.shape) == 3:
             if self.data.shape[0] == 3:
                 self.data = self.data.permute((1, 2, 0))
+                self.data = self.data.numpy()
 
+    def render(self, axs):
         axs.imshow(self.data, resample=False)
         axs.set(xticklabels=[], yticklabels=[], xticks=[], yticks=[])
+
+    def save(self, path):
+        plt.imsave(path, self.data)
 
 
 class ScoreGridField(GridField):
@@ -184,6 +198,13 @@ def show_grid(grid: List[List[Optional[GridField]]], name):
     plt.close(fig)
 
 
+def save_grid(grid: List[List[Optional[GridField]]], path):
+    for x, col in enumerate(grid):
+        for y, field in enumerate(col):
+            if field is not None and isinstance(field, ImageGridField):
+                field.save(path.replace('.png', f'_{x}_{y}.png'))
+
+
 def glimpse_map(patches, coords: List[Coords], output_shape):
     img = torch.zeros(output_shape, dtype=torch.uint8)
     for coord, patch in sorted([(coord, patch) for patch, coord in zip(patches, coords)], key=itemgetter(0),
@@ -222,7 +243,7 @@ def selection_map(mask, patch_size):
 
 
 def visualize_one(model: BaseRlMAE, image: Tensor, out: Tensor, coords: Tensor, patches: Tensor, scores: Tensor,
-                  target: Tensor, done: Tensor, save_path: str, rev_normalizer) -> None:
+                  target: Tensor, done: Tensor, save_path: str, rev_normalizer, save_all: bool) -> None:
     num_glimpses = model.num_glimpses
     patches_per_glimpse = coords.shape[0] // num_glimpses
     assert patches_per_glimpse * num_glimpses == coords.shape[0]  # assert if divisible by num_glimpses
@@ -273,9 +294,11 @@ def visualize_one(model: BaseRlMAE, image: Tensor, out: Tensor, coords: Tensor, 
         )
 
     show_grid(grid, save_path)
+    if save_all:
+        save_grid(grid, save_path)
 
 
-def visualize(visualization_path, model):
+def visualize(visualization_path, model, save_all=False):
     data = model.user_forward_hook.compute()
 
     rev_normalizer = RevNormalizer()
@@ -286,7 +309,7 @@ def visualize(visualization_path, model):
             zip(images, data["out"], data["coords"], patches, data['scores'], data['targets'], data['done']),
             total=images.shape[0])):
         visualize_one(model, img, out, coord, patch, score, target, done,
-                      os.path.join(visualization_path, f"{idx}.png"), rev_normalizer)
+                      os.path.join(visualization_path, f"{idx}.png"), rev_normalizer, save_all)
 
 
 def main():
@@ -313,7 +336,7 @@ def main():
     trainer = Trainer()
     trainer.test(model)
 
-    visualize(visualization_path, model)
+    visualize(visualization_path, model, save_all=args.save_all)
 
 
 if __name__ == "__main__":
