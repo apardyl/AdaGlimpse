@@ -925,7 +925,9 @@ class SegmentationRlMAE(BaseRlMAE):
         if mode == 'train':
             loss = self.loss_fn(pred, batch['mask']).mean()
             self.log(name='train/backbone_loss', value=loss.item(), on_step=True, on_epoch=False)
-            optimizer_actor, optimizer_critic, optimizer_alpha, optimizer_backbone = self.optimizers()
+            _, _, _, optimizer_backbone = self.optimizers()
             optimizer_backbone.zero_grad()
             self.manual_backward(loss)
             optimizer_backbone.step()
+            _, _, _, scheduler_backbone = self.lr_schedulers()
+            scheduler_backbone.step()
