@@ -14,13 +14,13 @@ from torch.utils.data import DistributedSampler
 from torchrl.data import ReplayBuffer, LazyTensorStorage, BoundedTensorSpec
 from torchrl.envs.utils import ExplorationType, set_exploration_type
 from torchrl.objectives import SoftUpdate, SACLoss
-from torchvision.models.segmentation import deeplabv3_resnet50, DeepLabV3
+from torchvision.models.segmentation import DeepLabV3, deeplabv3_resnet101
 
 from architectures.base import AutoconfigLightningModule
 from architectures.mae import MaskedAutoencoderViT, mae_vit_base_patch16, mae_vit_small_patch16, mae_vit_large_patch16
+from architectures.rl.actor_critic import ActorCritic
 from architectures.rl.glimpse_engine import glimpse_engine, BaseGlimpseEngine
 from architectures.rl.shared_memory import SharedMemory
-from architectures.rl.actor_critic import ActorCritic
 from architectures.utils import MetricMixin, RevNormalizer, filter_checkpoint
 from datasets.base import BaseDataModule
 from datasets.classification import BaseClassificationDataModule
@@ -127,7 +127,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         if self.teacher_type == 'vit':
             self.teacher_model = mae_vit_base_patch16(img_size=datamodule.image_size, with_decoder=False)
         elif self.teacher_type == 'deeplab':
-            self.teacher_model = deeplabv3_resnet50(num_classes=self.decoder_out_channels)
+            self.teacher_model = deeplabv3_resnet101(num_classes=self.decoder_out_channels)
         if self.teacher_path is not None and not self.teacher_path:
             self.load_teacher(teacher_path)
             for p in self.teacher_model.parameters():
