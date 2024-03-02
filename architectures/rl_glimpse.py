@@ -417,7 +417,11 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
             else:
                 self.train_loader = self.datamodule.train_dataloader()
 
-            self.steps_per_epoch = len(self.train_loader) * (self.num_glimpses + 1)
+            if self.pretraining or self.teacher_pretraining:
+                self.steps_per_epoch = len(self.train_loader)
+            else:
+                self.steps_per_epoch = len(self.train_loader) * (self.num_glimpses + 1)
+
             self.replay_buffer = ReplayBuffer(
                 storage=LazyTensorStorage(
                     max_size=self.replay_buffer_size,
