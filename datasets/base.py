@@ -118,7 +118,7 @@ class BaseDataModule(LightningDataModule, abc.ABC):
             sampler = RandomSampler(self.test_dataset, replacement=True, num_samples=self.num_random_eval_samples)
         return DataLoader(self.test_dataset, batch_size=self.eval_batch_size, sampler=sampler,
                           shuffle=self.force_shuffle, num_workers=self.num_workers, pin_memory=True,
-                          drop_last=self.always_drop_last, persistent_workers=self.num_workers > 0)
+                          drop_last=self.always_drop_last)
 
     def val_dataloader(self, sampler=None) -> EVAL_DATALOADERS:
         if not hasattr(self.val_dataset, 'patch_sampler'):
@@ -129,7 +129,7 @@ class BaseDataModule(LightningDataModule, abc.ABC):
             sampler = RandomSampler(self.val_dataset, replacement=True, num_samples=self.num_random_eval_samples)
         return DataLoader(self.val_dataset, batch_size=self.eval_batch_size, sampler=sampler,
                           shuffle=self.force_shuffle, num_workers=self.num_workers, pin_memory=True,
-                          drop_last=self.always_drop_last)
+                          drop_last=self.always_drop_last, persistent_workers=self.num_workers > 0)
 
     def _load_to_memfs(self):
         raise TypeError()

@@ -148,7 +148,7 @@ def get_aug_seg_transforms(img_size):
         ColorMaskJitter(0.3, 0.3, 0.3),
         # RandomMaskCrop((IMG_SIZE[1], IMG_SIZE[0]), pad_if_needed=True),
         # MaskResize(img_size),
-        RandomMaskResizedCrop(img_size, scale=(0.08, 1.0)),
+        RandomMaskResizedCrop(img_size, scale=(0.8, 1.0)),
         RandomMaskImageChoice([GrayScale(p=1.0),
                                Solarization(p=1.0),
                                GaussianBlur(p=1.0)]),

@@ -3,7 +3,7 @@ import sys
 from abc import ABC, abstractmethod
 from contextlib import nullcontext
 from functools import partial
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, Union
 
 import torch
 import torchmetrics
@@ -14,6 +14,7 @@ from torch.utils.data import DistributedSampler
 from torchrl.data import ReplayBuffer, LazyTensorStorage, BoundedTensorSpec
 from torchrl.envs.utils import ExplorationType, set_exploration_type
 from torchrl.objectives import SoftUpdate, SACLoss
+from torchvision.models.segmentation import deeplabv3_resnet50, DeepLabV3
 
 from architectures.base import AutoconfigLightningModule
 from architectures.mae import MaskedAutoencoderViT, mae_vit_base_patch16, mae_vit_small_patch16, mae_vit_large_patch16
@@ -40,7 +41,8 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                  lr=3e-4, backbone_lr=1e-5, parallel_games=2, backbone_training_type: str = 'constant',
                  rl_loss_function: str = 'smooth_l1', glimpse_size_penalty: float = 0., reward_type='diff',
                  early_stop_threshold=None, extract_latent_layer=None, rl_target_entropy=None,
-                 teacher_path=None, pretraining=False, pretrained_checkpoint=None, exclude_rl_inputs=None, **_) -> None:
+                 teacher_type=None, teacher_path=None, pretraining=False, pretrained_checkpoint=None,
+                 exclude_rl_inputs=None, teacher_pretraining=False, backbone_decay=1e-4, **_) -> None:
         super().__init__()
 
         self.steps_per_epoch = None
@@ -61,7 +63,10 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         self.early_stop_threshold = early_stop_threshold
         self.extract_latent_layer = extract_latent_layer
         self.rl_target_entropy = rl_target_entropy
+        self.teacher_type = teacher_type
         self.teacher_path = teacher_path
+        self.teacher_pretraining = teacher_pretraining
+        self.backbone_decay = backbone_decay
 
         self.replay_buffer_size = replay_buffer_size
         self.parallel_games = parallel_games
@@ -70,16 +75,18 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
 
         self.automatic_optimization = False  # disable lightning automation
 
-        self.mae = {
-            'small': mae_vit_small_patch16,
-            'base': mae_vit_base_patch16,
-            'large': mae_vit_large_patch16
-        }[backbone_size](img_size=datamodule.image_size, out_chans=self.decoder_out_channels,
-                         with_decoder=self.needs_decoder)
-        # noinspection PyTypeChecker
-        self.mae: MaskedAutoencoderViT = torch.compile(self.mae, mode='reduce-overhead')
+        self.mae = None
+        if not self.teacher_pretraining:
+            self.mae = {
+                'small': mae_vit_small_patch16,
+                'base': mae_vit_base_patch16,
+                'large': mae_vit_large_patch16
+            }[backbone_size](img_size=datamodule.image_size, out_chans=self.decoder_out_channels,
+                             with_decoder=self.needs_decoder)
+            # noinspection PyTypeChecker
+            self.mae: MaskedAutoencoderViT = torch.compile(self.mae, mode='reduce-overhead')
 
-        self.actor_critic = ActorCritic(embed_dim=self.mae.patch_embed.embed_dim,
+        self.actor_critic = ActorCritic(embed_dim=self.mae.patch_embed.embed_dim if self.mae is not None else 1,
                                         patch_num=self.num_glimpses * (self.glimpse_grid_size ** 2),
                                         exclude_inputs=exclude_rl_inputs)
 
@@ -116,14 +123,20 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
 
         self.real_train_step = 0
 
-        self.teacher_model: Optional[MaskedAutoencoderViT] = None
-        if self.teacher_path is not None:
+        self.teacher_model: Optional[Union[MaskedAutoencoderViT, DeepLabV3]] = None
+        if self.teacher_type == 'vit':
             self.teacher_model = mae_vit_base_patch16(img_size=datamodule.image_size, with_decoder=False)
+        elif self.teacher_type == 'deeplab':
+            self.teacher_model = deeplabv3_resnet50(num_classes=self.decoder_out_channels)
+        if self.teacher_path is not None and not self.teacher_path:
             self.load_teacher(teacher_path)
             for p in self.teacher_model.parameters():
                 p.requires_grad = False
+
+        if self.teacher_type is not None and not self.teacher_pretraining:
             # noinspection PyTypeChecker
-            self.teacher_model: MaskedAutoencoderViT = torch.compile(self.teacher_model, mode='reduce-overhead')
+            self.teacher_model: Union[MaskedAutoencoderViT, DeepLabV3] = torch.compile(self.teacher_model,
+                                                                                       mode='reduce-overhead')
 
         self.pretraining_sampler = PretrainingSampler(max_glimpses=self.num_glimpses,
                                                       glimpse_size=self.glimpse_grid_size)
@@ -224,6 +237,11 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                             help='target entropy for SAC algorithm',
                             type=float,
                             default=None)
+        parser.add_argument('--teacher-type',
+                            help='teacher model type',
+                            type=str,
+                            default=None,
+                            choices=['vit', 'deeplab'])
         parser.add_argument('--teacher-path',
                             help='use distilled targets by running a model on full image',
                             type=str,
@@ -233,11 +251,20 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                             type=bool,
                             default=False,
                             action=argparse.BooleanOptionalAction)
+        parser.add_argument('--teacher-pretraining',
+                            help='teacher pretraining mode',
+                            type=bool,
+                            default=False,
+                            action=argparse.BooleanOptionalAction)
         parser.add_argument('--exclude-rl-inputs',
                             help='exclude parts of the rl state for ablation study',
                             type=str,
                             action='extend',
                             nargs='*')
+        parser.add_argument('--backbone-decay',
+                            help='backbone weight decay',
+                            type=float,
+                            default=1e-4)
         return parent_parser
 
     def configure_optimizers(self):
@@ -274,7 +301,8 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
             epochs=self.epochs,
             steps_per_epoch=self.steps_per_epoch
         )
-        backbone_optimizer = torch.optim.AdamW(self.mae.parameters(), self.lr, weight_decay=1e-4)
+        backbone_params = self.mae.parameters() if not self.teacher_pretraining else self.teacher_model.parameters()
+        backbone_optimizer = torch.optim.AdamW(backbone_params, self.lr, weight_decay=self.backbone_decay)
         backbone_scheduler = torch.optim.lr_scheduler.OneCycleLR(
             optimizer=backbone_optimizer,
             max_lr=self.backbone_lr,
@@ -331,8 +359,8 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         else:
             raise ValueError("Unable to parse pretrained model checkpoint")
         del checkpoint['_orig_mod.pos_embed']
-        if '_orig_mod.decoder_pred.weight' in checkpoint and checkpoint[
-            '_orig_mod.decoder_pred.weight'].shape != self.mae.decoder_pred.weight.shape:
+        if ('_orig_mod.decoder_pred.weight' in checkpoint
+                and checkpoint['_orig_mod.decoder_pred.weight'].shape != self.mae.decoder_pred.weight.shape):
             del checkpoint['_orig_mod.decoder_pred.weight']
             del checkpoint['_orig_mod.decoder_pred.bias']
         print(self.mae.load_state_dict(checkpoint, strict=False), file=sys.stderr)
@@ -342,8 +370,8 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         checkpoint = checkpoint["state_dict"]
         self.actor_critic.load_state_dict(filter_checkpoint(checkpoint, 'actor_critic.'), strict=True)
         self._restore_rl(checkpoint)
-        if 'mae._orig_mod.decoder_pred.weight' in checkpoint and checkpoint[
-            'mae._orig_mod.decoder_pred.weight'].shape != self.mae.decoder_pred.weight.shape:
+        if ('mae._orig_mod.decoder_pred.weight' in checkpoint
+                and checkpoint['mae._orig_mod.decoder_pred.weight'].shape != self.mae.decoder_pred.weight.shape):
             del checkpoint['mae._orig_mod.decoder_pred.weight']
             del checkpoint['mae._orig_mod.decoder_pred.bias']
         print(self.mae.load_state_dict(filter_checkpoint(checkpoint, 'mae.'), strict=False))
@@ -361,12 +389,12 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         return torch.zeros((batch_size, 0))
 
     def train_dataloader(self) -> TRAIN_DATALOADERS:
-        if self.pretraining:
+        if self.pretraining or self.teacher_pretraining:
             return self.train_loader
         return self.engine.get_loader(dataloader=self.train_loader)
 
     def val_dataloader(self) -> EVAL_DATALOADERS:
-        if self.pretraining:
+        if self.pretraining or self.teacher_pretraining:
             return self.val_loader
         return self.engine.get_loader(dataloader=self.val_loader)
 
@@ -584,17 +612,23 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         out = self.teacher_model.forward_head(latent)
         self.distillation_targets[game_idx] = out.clone().detach()
 
+    def teacher_training_step(self, batch, mode):
+        raise NotImplementedError()
+
     def pretraining_step(self, batch, mode):
-        latent, pos_embed = self.mae.forward_encoder(batch['patches'], coords=batch['coords'])
-        _, backbone_loss, _ = self._forward_task(batch['image'], batch.get('mask', None), latent,
-                                                 is_done=True, with_loss_and_grad=True, mode=mode,
-                                                 distilled_target=None)
-        if mode == 'train':
-            optimizer_actor, optimizer_critic, optimizer_alpha, optimizer_backbone = self.optimizers()
-            self.backbone_training_step(optimizer_backbone, backbone_loss)
+        if self.teacher_pretraining:
+            self.teacher_training_step(batch, mode)
+        else:
+            latent, pos_embed = self.mae.forward_encoder(batch['patches'], coords=batch['coords'])
+            _, backbone_loss, _ = self._forward_task(batch['image'], batch.get('mask', None), latent,
+                                                     is_done=True, with_loss_and_grad=True, mode=mode,
+                                                     distilled_target=None)
+            if mode == 'train':
+                optimizer_actor, optimizer_critic, optimizer_alpha, optimizer_backbone = self.optimizers()
+                self.backbone_training_step(optimizer_backbone, backbone_loss)
 
     def training_step(self, batch, batch_idx: int):
-        if self.pretraining:
+        if self.pretraining or self.teacher_pretraining:
             self.pretraining_step(batch, 'train')
             return
 
@@ -672,7 +706,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
             self.backbone_training_step(optimizer_backbone, backbone_loss)
 
     def inference_step(self, batch, batch_idx, mode):
-        if self.pretraining:
+        if self.pretraining or self.teacher_pretraining:
             self.pretraining_step(batch, 'val')
             return
 
@@ -882,3 +916,16 @@ class SegmentationRlMAE(BaseRlMAE):
         loss = loss.mean()
 
         return out, loss, score.reshape(score.shape[0], 1)
+
+    def teacher_training_step(self, batch, mode):
+        pred = self.teacher_model(batch['image'])['out']
+        self.log_metric(mode, 'mPA', pred.detach(), batch['mask'], on_epoch=True, batch_size=pred.shape[0])
+        self.log_metric(mode, 'PA', pred.detach(), batch['mask'], on_epoch=True, batch_size=pred.shape[0])
+        self.log_metric(mode, 'mIoU', pred.detach(), batch['mask'], on_epoch=True, batch_size=pred.shape[0])
+        if mode == 'train':
+            loss = self.loss_fn(pred, batch['mask']).mean()
+            self.log(name='train/backbone_loss', value=loss.item(), on_step=True, on_epoch=False)
+            optimizer_actor, optimizer_critic, optimizer_alpha, optimizer_backbone = self.optimizers()
+            optimizer_backbone.zero_grad()
+            self.manual_backward(loss)
+            optimizer_backbone.step()
