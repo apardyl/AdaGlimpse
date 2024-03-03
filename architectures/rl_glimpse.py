@@ -128,15 +128,10 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
             self.teacher_model = mae_vit_base_patch16(img_size=datamodule.image_size, with_decoder=False)
         elif self.teacher_type == 'deeplab':
             self.teacher_model = deeplabv3_resnet101(num_classes=self.decoder_out_channels)
-        if self.teacher_path is not None and not self.teacher_path:
+        if self.teacher_path is not None and not self.teacher_pretraining:
             self.load_teacher(teacher_path)
             for p in self.teacher_model.parameters():
                 p.requires_grad = False
-
-        if self.teacher_type is not None and not self.teacher_pretraining:
-            # noinspection PyTypeChecker
-            self.teacher_model: Union[MaskedAutoencoderViT, DeepLabV3] = torch.compile(self.teacher_model,
-                                                                                       mode='reduce-overhead')
 
         self.pretraining_sampler = PretrainingSampler(max_glimpses=self.num_glimpses,
                                                       glimpse_size=self.glimpse_grid_size)
@@ -378,7 +373,14 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
 
     def load_teacher(self, path):
         checkpoint = torch.load(path, map_location='cpu')
-        print(self.teacher_model.load_state_dict(checkpoint['model'], strict=False), file=sys.stderr)
+        if self.teacher_type == 'deeplab':
+            print(self.teacher_model.load_state_dict(
+                filter_checkpoint(checkpoint['state_dict'], 'teacher_model.'), strict=False),
+                file=sys.stderr)
+        elif self.teacher_type == 'vit':
+            print(self.teacher_model.load_state_dict(checkpoint['model'], strict=False), file=sys.stderr)
+        else:
+            raise NotImplementedError()
 
     @staticmethod
     def _copy_target_tensor_fn(target: torch.Tensor, batch: Dict[str, torch.Tensor]):
@@ -611,10 +613,14 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         self.log(name='train/backbone_loss', value=backbone_loss.mean().item(), on_step=True, on_epoch=False)
 
     @torch.inference_mode()
-    def teacher_step(self, env_state: SharedMemory, game_idx: int):
-        latent, _ = self.teacher_model.forward_encoder(env_state.images)
-        out = self.teacher_model.forward_head(latent)
-        self.distillation_targets[game_idx] = out.clone().detach()
+    def teacher_step(self, images: torch.Tensor, game_idx: int):
+        if self.teacher_type == 'vit':
+            latent, _ = self.teacher_model.forward_encoder(images)
+            out = self.teacher_model.forward_head(latent)
+            self.distillation_targets[game_idx] = out.clone().detach()
+        elif self.teacher_type == 'deeplab':
+            out = self.teacher_model(images)['out']
+            self.distillation_targets[game_idx] = out.clone().detach()
 
     def teacher_training_step(self, batch, mode):
         raise NotImplementedError()
@@ -623,10 +629,13 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         if self.teacher_pretraining:
             self.teacher_training_step(batch, mode)
         else:
+            if mode == 'train' and self.teacher_model is not None:
+                self.teacher_step(batch['image'], 0)
             latent, pos_embed = self.mae.forward_encoder(batch['patches'], coords=batch['coords'])
             _, backbone_loss, _ = self._forward_task(batch['image'], batch.get('mask', None), latent,
                                                      is_done=True, with_loss_and_grad=True, mode=mode,
-                                                     distilled_target=None)
+                                                     distilled_target=self.distillation_targets[
+                                                         0] if mode == 'train' else None)
             if mode == 'train':
                 optimizer_actor, optimizer_critic, optimizer_alpha, optimizer_backbone = self.optimizers()
                 self.backbone_training_step(optimizer_backbone, backbone_loss)
@@ -648,7 +657,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         env_state, game_idx = batch
 
         if self.teacher_model is not None and env_state.current_glimpse == 0:
-            self.teacher_step(env_state, game_idx)
+            self.teacher_step(env_state.images, game_idx)
 
         next_state, step, backbone_loss = self.forward_game_state(env_state, mode='train',
                                                                   distilled_target=self.distillation_targets[game_idx])
@@ -836,14 +845,12 @@ class ClassificationRlMAE(BaseRlMAE):
                       with_loss_and_grad: bool, mode: str, distilled_target: Optional[torch.Tensor] = None):
         out = self.mae.forward_head(latent)
 
-        true_target = targets
-
         if is_done:
-            self.log_metric(mode, 'accuracy', out.detach(), true_target, on_epoch=True, batch_size=latent.shape[0])
+            self.log_metric(mode, 'accuracy', out.detach(), targets, on_epoch=True, batch_size=latent.shape[0])
 
         if distilled_target is not None:
             if is_done:
-                self.log_metric('train', 'teacher_accuracy', distilled_target.argmax(dim=-1), true_target,
+                self.log_metric('train', 'teacher_accuracy', distilled_target.argmax(dim=-1), targets,
                                 on_epoch=True,
                                 batch_size=latent.shape[0])
             log_target = torch.nn.functional.log_softmax(distilled_target, dim=-1)
@@ -854,14 +861,14 @@ class ClassificationRlMAE(BaseRlMAE):
             loss = kl.mean()
         else:
             if mode == 'train':
-                score_target = true_target
+                score_target = targets
             else:
                 # use model output for early stopping in validation
                 score_target = out.argmax(dim=-1)
             score = torch.nn.functional.softmax(out, dim=-1)
             score = score[torch.arange(score.shape[0]), score_target]
             score = score
-            loss = self.loss_fn(out, true_target)
+            loss = self.loss_fn(out, targets)
 
         return out, loss, score.reshape(score.shape[0], 1)
 
@@ -892,6 +899,11 @@ class SegmentationRlMAE(BaseRlMAE):
                                            num_classes=self.num_classes,
                                            ignore_index=self.ignore_label,
                                            average='macro'))
+        self.define_metric('teacher_mPA', partial(torchmetrics.classification.MulticlassAccuracy,
+                                                  num_classes=self.num_classes,
+                                                  ignore_index=self.ignore_label,
+                                                  average='macro',
+                                                  multidim_average='global'))
 
         self.loss_fn = torch.nn.CrossEntropyLoss(reduction='none', ignore_index=self.ignore_label)
 
@@ -909,15 +921,26 @@ class SegmentationRlMAE(BaseRlMAE):
         out = self.mae.unpatchify(out)
         pred = out.argmax(dim=1).detach()
 
-        loss = self.loss_fn(out, targets).mean(dim=-1).mean(dim=-1)
-
         if is_done:
             self.log_metric(mode, 'mPA', pred, targets, on_epoch=True, batch_size=latent.shape[0])
             self.log_metric(mode, 'PA', pred, targets, on_epoch=True, batch_size=latent.shape[0])
             self.log_metric(mode, 'mIoU', pred, targets, on_epoch=True, batch_size=latent.shape[0])
 
-        score = -loss
-        loss = loss.mean()
+        if distilled_target is not None:
+            if is_done:
+                self.log_metric('train', 'teacher_mPA', distilled_target.argmax(dim=1), targets,
+                                on_epoch=True,
+                                batch_size=distilled_target.shape[0])
+            log_target = torch.nn.functional.log_softmax(distilled_target, dim=1)
+            log_out = torch.nn.functional.log_softmax(out, dim=1)
+            kl = torch.nn.functional.kl_div(input=log_out, target=log_target, log_target=True,
+                                            reduction='none').mean(dim=-1).mean(dim=-1).sum(dim=-1)
+            score = -kl
+            loss = kl.mean()
+        else:
+            loss = self.loss_fn(out, targets).mean(dim=-1).mean(dim=-1)
+            score = -loss
+            loss = loss.mean()
 
         return out, loss, score.reshape(score.shape[0], 1)
 

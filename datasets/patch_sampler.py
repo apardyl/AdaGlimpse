@@ -92,11 +92,15 @@ class PretrainingSampler(SimplePatchSampler):
         sizes = self.rng.integers(self.min_patch_size,
                                   self.max_patch_size,
                                   size=(self.max_glimpses - 1) * (self.glimpse_size ** 2))
-        sizes = np.concatenate((np.asarray([224 // self.glimpse_size] * (self.glimpse_size ** 2)), sizes))
         sizes = sizes.astype(np.int64)
         ys = self.rng.integers(0, img_size[0] - sizes)
         xs = self.rng.integers(0, img_size[1] - sizes)
-        return zip(ys, xs, sizes)
+
+        first_glimpse = [(i, j, img_size[0] // self.glimpse_size) for i in
+                         range(0, img_size[0], img_size[0] // self.glimpse_size) for j in
+                         range(0, img_size[1], img_size[1] // self.glimpse_size)]
+
+        return first_glimpse + list(zip(ys, xs, sizes))
 
 
 class RandomDelegatedSampler(PatchSampler):
