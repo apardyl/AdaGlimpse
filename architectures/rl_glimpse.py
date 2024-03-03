@@ -939,7 +939,7 @@ class SegmentationRlMAE(BaseRlMAE):
             log_target = torch.nn.functional.log_softmax(distilled_target, dim=1)
             log_out = torch.nn.functional.log_softmax(out, dim=1)
             kl = torch.nn.functional.kl_div(input=log_out, target=log_target, log_target=True,
-                                            reduction='none').mean(dim=-1).mean(dim=-1).sum(dim=-1)
+                                            reduction='none').mean(dim=-1).mean(dim=-1).sum(dim=-1) * 10
             score = -kl
             loss = kl.mean()
         else:
