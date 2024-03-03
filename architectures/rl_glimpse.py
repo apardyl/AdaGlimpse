@@ -639,6 +639,8 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
             if mode == 'train':
                 optimizer_actor, optimizer_critic, optimizer_alpha, optimizer_backbone = self.optimizers()
                 self.backbone_training_step(optimizer_backbone, backbone_loss)
+                _, _, _, scheduler_backbone = self.lr_schedulers()
+                scheduler_backbone.step()
 
     def training_step(self, batch, batch_idx: int):
         if self.pretraining or self.teacher_pretraining:
