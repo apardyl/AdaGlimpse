@@ -466,10 +466,11 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         if not hasattr(self.rl_loss_module, '_cache'):
             self.rl_loss_module._cache = {}
 
+    def on_train_epoch_start(self) -> None:
+        super().on_train_epoch_start()
+
         if isinstance(self.trainer.strategy, ParallelStrategy):
             self.train_loader.sampler.set_epoch(self.trainer.current_epoch)
-
-        self.replay_buffer.empty()
 
     @abstractmethod
     def _forward_task(self, images: torch.Tensor, targets: torch.Tensor, latent: torch.Tensor, is_done: bool,
