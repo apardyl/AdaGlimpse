@@ -149,9 +149,9 @@ def get_aug_seg_transforms(img_size):
         # RandomMaskCrop((IMG_SIZE[1], IMG_SIZE[0]), pad_if_needed=True),
         # MaskResize(img_size),
         RandomMaskResizedCrop(img_size, scale=(0.75, 1.0)),
-        # RandomMaskImageChoice([GrayScale(p=1.0),
-        #                        Solarization(p=1.0),
-        #                        GaussianBlur(p=1.0)]),
+        RandomMaskImageChoice([GrayScale(p=1.0),
+                               Solarization(p=1.0),
+                               GaussianBlur(p=1.0)]),
         MaskToTensor(),
         MaskNormalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)
     ])
