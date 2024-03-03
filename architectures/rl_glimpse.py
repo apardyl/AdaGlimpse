@@ -32,7 +32,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
     internal_data = True
     checkpoint_metric = None
     autograd_backbone = True
-    needs_decoder = True
+    decoder_type = 'none'
     decoder_out_channels = 3
 
     def __init__(self, datamodule: BaseDataModule, backbone_size='base', pretrained_mae_path=None, num_glimpses=14,
@@ -82,7 +82,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                 'base': mae_vit_base_patch16,
                 'large': mae_vit_large_patch16
             }[backbone_size](img_size=datamodule.image_size, out_chans=self.decoder_out_channels,
-                             with_decoder=self.needs_decoder)
+                             decoder_type=self.decoder_type)
             # noinspection PyTypeChecker
             self.mae: MaskedAutoencoderViT = torch.compile(self.mae, mode='reduce-overhead')
 
@@ -125,7 +125,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
 
         self.teacher_model: Optional[Union[MaskedAutoencoderViT, DeepLabV3]] = None
         if self.teacher_type == 'vit':
-            self.teacher_model = mae_vit_base_patch16(img_size=datamodule.image_size, with_decoder=False)
+            self.teacher_model = mae_vit_base_patch16(img_size=datamodule.image_size, decoder_type='none')
         elif self.teacher_type == 'deeplab':
             self.teacher_model = deeplabv3_resnet101(num_classes=self.decoder_out_channels)
         if self.teacher_path is not None and not self.teacher_pretraining:
@@ -354,7 +354,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         else:
             raise ValueError("Unable to parse pretrained model checkpoint")
         del checkpoint['_orig_mod.pos_embed']
-        if ('_orig_mod.decoder_pred.weight' in checkpoint
+        if (hasattr(self.mae, 'decoder_pred') and '_orig_mod.decoder_pred.weight' in checkpoint
                 and checkpoint['_orig_mod.decoder_pred.weight'].shape != self.mae.decoder_pred.weight.shape):
             del checkpoint['_orig_mod.decoder_pred.weight']
             del checkpoint['_orig_mod.decoder_pred.bias']
@@ -365,7 +365,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         checkpoint = checkpoint["state_dict"]
         self.actor_critic.load_state_dict(filter_checkpoint(checkpoint, 'actor_critic.'), strict=True)
         self._restore_rl(checkpoint)
-        if ('mae._orig_mod.decoder_pred.weight' in checkpoint
+        if (hasattr(self.mae, 'decoder_pred') and 'mae._orig_mod.decoder_pred.weight' in checkpoint
                 and checkpoint['mae._orig_mod.decoder_pred.weight'].shape != self.mae.decoder_pred.weight.shape):
             del checkpoint['mae._orig_mod.decoder_pred.weight']
             del checkpoint['mae._orig_mod.decoder_pred.bias']
@@ -782,6 +782,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
 
 class ReconstructionRlMAE(BaseRlMAE):
     checkpoint_metric = 'val/rmse'
+    decoder_type = 'standard'
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -814,7 +815,7 @@ class ReconstructionRlMAE(BaseRlMAE):
 class ClassificationRlMAE(BaseRlMAE):
     checkpoint_metric = 'val/accuracy'
     checkpoint_metric_mode = 'max'
-    needs_decoder = False
+    decoder_type = 'none'
 
     # autograd_backbone = False
 
@@ -876,6 +877,7 @@ class ClassificationRlMAE(BaseRlMAE):
 class SegmentationRlMAE(BaseRlMAE):
     checkpoint_metric = 'val/mPA'
     checkpoint_metric_mode = 'max'
+    decoder_type = 'segment'
 
     def __init__(self, datamodule: BaseDataModule, *args, **kwargs) -> None:
         assert isinstance(datamodule, BaseSegmentationDataModule)
@@ -918,7 +920,7 @@ class SegmentationRlMAE(BaseRlMAE):
     def _forward_task(self, images: torch.Tensor, targets: torch.Tensor, latent: torch.Tensor, is_done: bool,
                       with_loss_and_grad: bool, mode: str, distilled_target: Optional[torch.Tensor] = None):
         out = self.mae.forward_decoder(latent)
-        out = self.mae.unpatchify(out)
+        # out = self.mae.unpatchify(out)
         pred = out.argmax(dim=1).detach()
 
         if is_done:

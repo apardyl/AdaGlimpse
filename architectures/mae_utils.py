@@ -273,3 +273,46 @@ class PatchEmbedElastic(nn.Module):
             x = x.reshape(B, P, self.embed_dim)
         x = self.norm(x)
         return x
+
+
+class VisionTransformerUpHead(nn.Module):
+    """ Vision Transformer with support for patch or hybrid CNN input stage
+    """
+
+    def __init__(self, out_channel, embed_dim=256, grid_shape=(14, 14)):
+        super(VisionTransformerUpHead, self).__init__()
+
+        self.grid_shape = grid_shape
+
+        self.conv_head = nn.Sequential(
+            nn.Conv2d(embed_dim, embed_dim, kernel_size=3, stride=1, padding=1),
+            nn.SyncBatchNorm(embed_dim),
+            nn.GELU(),
+            nn.Upsample(scale_factor=2, mode='bilinear'),
+            nn.Conv2d(embed_dim, 256, kernel_size=3, stride=1, padding=1),
+            nn.SyncBatchNorm(256),
+            nn.GELU(),
+            nn.Upsample(scale_factor=2, mode='bilinear'),
+            nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1),
+            nn.SyncBatchNorm(256),
+            nn.GELU(),
+            nn.Upsample(scale_factor=2, mode='bilinear'),
+            nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1),
+            nn.SyncBatchNorm(256),
+            nn.GELU(),
+            nn.Upsample(scale_factor=2, mode='bilinear'),
+            nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1),
+            nn.SyncBatchNorm(256),
+            nn.GELU(),
+            nn.Conv2d(256, out_channel, kernel_size=1, stride=1)
+        )
+
+    def forward(self, x):
+        n, hw, c = x.shape
+        h, w = self.grid_shape
+        assert hw == h * w
+        x = x.transpose(1, 2).reshape(n, c, h, w)
+
+        x = self.conv_head(x)
+
+        return x

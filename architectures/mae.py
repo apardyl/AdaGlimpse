@@ -18,7 +18,7 @@ import torch
 import torch.nn as nn
 
 from architectures.mae_utils import get_2dplus_sincos_pos_embed, PatchEmbedElastic, \
-    get_2dplus_sincos_pos_embed_coords, Layer_scale_init_Block, get_2d_sincos_pos_embed
+    get_2dplus_sincos_pos_embed_coords, Layer_scale_init_Block, get_2d_sincos_pos_embed, VisionTransformerUpHead
 
 
 class MaskedAutoencoderViT(nn.Module):
@@ -30,7 +30,7 @@ class MaskedAutoencoderViT(nn.Module):
                  decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16,
                  mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, drop_rate: float = 0.,
                  fc_norm: Optional[bool] = None, global_pool: str = 'token', num_classes: int = 1000,
-                 with_decoder=True):
+                 decoder_type='standard'):
         super().__init__()
 
         assert global_pool in ('', 'avg', 'token')
@@ -58,14 +58,14 @@ class MaskedAutoencoderViT(nn.Module):
 
         # --------------------------------------------------------------------------
         # MAE decoder specifics
-        self.with_decoder = with_decoder
-        if with_decoder:
+        self.decoder_type = decoder_type
+        if decoder_type != 'none':
             self.decoder_embed = nn.Linear(embed_dim, decoder_embed_dim, bias=True)
 
             self.mask_token = nn.Parameter(torch.zeros(1, 1, decoder_embed_dim))
 
             self.decoder_pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, decoder_embed_dim),
-                                              requires_grad=False)  # fixed sin-cos embedding
+                                                  requires_grad=False)  # fixed sin-cos embedding
 
             self.decoder_blocks = nn.ModuleList([
                 Layer_scale_init_Block(decoder_embed_dim, decoder_num_heads, mlp_ratio, qkv_bias=True, qk_scale=None,
@@ -73,7 +73,15 @@ class MaskedAutoencoderViT(nn.Module):
                 for i in range(decoder_depth)])
 
             self.decoder_norm = norm_layer(decoder_embed_dim)
-            self.decoder_pred = nn.Linear(decoder_embed_dim, patch_size ** 2 * out_chans, bias=True)  # decoder to patch
+
+            if decoder_type == 'standard':
+                self.decoder_pred = nn.Linear(decoder_embed_dim, patch_size ** 2 * out_chans,
+                                              bias=True)  # decoder to patch
+            elif decoder_type == 'segment':
+                self.decoder_segment = VisionTransformerUpHead(out_channel=out_chans, embed_dim=decoder_embed_dim,
+                                                               grid_shape=self.grid_size)
+            else:
+                assert False, 'unsupported decoder type'
             # --------------------------------------------------------------------------
 
             self.norm_pix_loss = norm_pix_loss
@@ -94,8 +102,9 @@ class MaskedAutoencoderViT(nn.Module):
         pos_embed = get_2dplus_sincos_pos_embed(self.pos_embed.shape[-1], self.grid_size)
         self.pos_embed.data.copy_(pos_embed.float().unsqueeze(0))
 
-        if self.with_decoder:
-            decoder_pos_embed = get_2d_sincos_pos_embed(self.decoder_pos_embed.shape[-1], self.grid_size, cls_token=True)
+        if self.decoder_type != 'none':
+            decoder_pos_embed = get_2d_sincos_pos_embed(self.decoder_pos_embed.shape[-1], self.grid_size,
+                                                        cls_token=True)
             self.decoder_pos_embed.data.copy_(torch.from_numpy(decoder_pos_embed).float().unsqueeze(0))
 
         # initialize patch_embed like nn.Linear (instead of nn.Conv2d)
@@ -104,7 +113,7 @@ class MaskedAutoencoderViT(nn.Module):
 
         # timm's trunc_normal_(std=.02) is effectively normal_(std=0.02) as cutoff is too big (2.)
         torch.nn.init.normal_(self.cls_token, std=.02)
-        if self.with_decoder:
+        if self.decoder_type != 'none':
             torch.nn.init.normal_(self.mask_token, std=.02)
 
         # initialize nn.Linear and nn.LayerNorm
@@ -206,8 +215,6 @@ class MaskedAutoencoderViT(nn.Module):
             x = blk(x)
 
         x = self.decoder_norm(x)
-        # predictor projection
-        x = self.decoder_pred(x)
 
         if mask is not None:
             # remove cls token
@@ -215,6 +222,12 @@ class MaskedAutoencoderViT(nn.Module):
         else:
             # remove all known tokens
             x = x[:, known_tokens:, :]
+
+        # predictor projection
+        if self.decoder_type == 'standard':
+            x = self.decoder_pred(x)
+        elif self.decoder_type == 'segment':
+            x = self.decoder_segment(x)
 
         return x
 
