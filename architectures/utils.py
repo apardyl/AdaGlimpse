@@ -92,3 +92,7 @@ class RevNormalizer:
 def filter_checkpoint(checkpoint, prefix: str):
     p = len(prefix)
     return {k[p:]: v for k, v in checkpoint.items() if k.startswith(prefix)}
+
+
+def stub(*args, **kwargs):
+    pass

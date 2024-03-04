@@ -21,7 +21,7 @@ from architectures.mae import MaskedAutoencoderViT, mae_vit_base_patch16, mae_vi
 from architectures.rl.actor_critic import ActorCritic
 from architectures.rl.glimpse_engine import glimpse_engine, BaseGlimpseEngine
 from architectures.rl.shared_memory import SharedMemory
-from architectures.utils import MetricMixin, RevNormalizer, filter_checkpoint
+from architectures.utils import MetricMixin, RevNormalizer, filter_checkpoint, stub
 from datasets.base import BaseDataModule
 from datasets.classification import BaseClassificationDataModule
 from datasets.patch_sampler import PretrainingSampler
@@ -126,6 +126,8 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         self.teacher_model: Optional[Union[MaskedAutoencoderViT, DeepLabV3]] = None
         if self.teacher_type == 'vit':
             self.teacher_model = mae_vit_base_patch16(img_size=datamodule.image_size, decoder_type='none')
+            # noinspection PyTypeChecker
+            self.teacher_model: MaskedAutoencoderViT = torch.compile(self.teacher_model, mode='reduce-overhead')
         elif self.teacher_type == 'deeplab':
             self.teacher_model = deeplabv3_resnet101(num_classes=self.decoder_out_channels)
         if self.teacher_path is not None and not self.teacher_pretraining:
@@ -472,6 +474,9 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         if isinstance(self.trainer.strategy, ParallelStrategy):
             self.train_loader.sampler.set_epoch(self.trainer.current_epoch)
 
+        if self.teacher_model is not None:
+            self.teacher_model.eval()
+
     @abstractmethod
     def _forward_task(self, images: torch.Tensor, targets: torch.Tensor, latent: torch.Tensor, is_done: bool,
                       with_loss_and_grad: bool, mode: str, distilled_target: Optional[torch.Tensor] = None):
@@ -762,9 +767,6 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
     def _restore_rl(self, state_dict):
         rl_state_dict = filter_checkpoint(state_dict, 'rl_loss_module.')
         print(self.rl_loss_module.load_state_dict(rl_state_dict, strict=False))
-
-        def stub(*args, **kwargs):
-            pass
 
         # prevent auto-restore by lightning
         self.rl_loss_module._load_from_state_dict = stub
