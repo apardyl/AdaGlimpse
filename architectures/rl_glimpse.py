@@ -130,10 +130,11 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
             self.teacher_model: MaskedAutoencoderViT = torch.compile(self.teacher_model, mode='reduce-overhead')
         elif self.teacher_type == 'deeplab':
             self.teacher_model = deeplabv3_resnet101(num_classes=self.decoder_out_channels)
-        if self.teacher_path is not None and not self.teacher_pretraining:
+        if self.teacher_path is not None:
             self.load_teacher(teacher_path)
-            for p in self.teacher_model.parameters():
-                p.requires_grad = False
+            if not self.teacher_pretraining:
+                for p in self.teacher_model.parameters():
+                    p.requires_grad = False
 
         self.pretraining_sampler = PretrainingSampler(max_glimpses=self.num_glimpses,
                                                       glimpse_size=self.glimpse_grid_size)
@@ -474,7 +475,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         if isinstance(self.trainer.strategy, ParallelStrategy):
             self.train_loader.sampler.set_epoch(self.trainer.current_epoch)
 
-        if self.teacher_model is not None:
+        if self.teacher_model is not None and not self.teacher_pretraining:
             self.teacher_model.eval()
 
     @abstractmethod
