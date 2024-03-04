@@ -42,7 +42,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                  rl_loss_function: str = 'smooth_l1', glimpse_size_penalty: float = 0., reward_type='diff',
                  early_stop_threshold=None, extract_latent_layer=None, rl_target_entropy=None,
                  teacher_type=None, teacher_path=None, pretraining=False, pretrained_checkpoint=None,
-                 exclude_rl_inputs=None, teacher_pretraining=False, backbone_decay=1e-4, **_) -> None:
+                 exclude_rl_inputs=None, teacher_pretraining=False, backbone_decay=1e-4, fixed_scale=None, **_) -> None:
         super().__init__()
 
         self.steps_per_epoch = None
@@ -67,6 +67,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         self.teacher_path = teacher_path
         self.teacher_pretraining = teacher_pretraining
         self.backbone_decay = backbone_decay
+        self.fixed_scale = fixed_scale
 
         self.replay_buffer_size = replay_buffer_size
         self.parallel_games = parallel_games
@@ -263,6 +264,10 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                             help='backbone weight decay',
                             type=float,
                             default=1e-4)
+        parser.add_argument('--fixed-scale',
+                            help='use fixed glimpse scale',
+                            type=float,
+                            default=None)
         return parent_parser
 
     def configure_optimizers(self):
@@ -676,6 +681,8 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                 next_action = self.random_action(next_state.batch_size[0]).to(self.device)
             else:
                 next_action = self.forward_action(next_state, exploration_type=ExplorationType.RANDOM)
+            if self.fixed_scale is not None:
+                next_action[..., 3] = self.fixed_scale
             next_state['action'] = next_action
             env_state.action = next_action.detach()
 
