@@ -192,7 +192,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                             default=10)
         parser.add_argument('--backbone-training-type',
                             help='type of backbone training regime',
-                            choices=['disabled', 'constant', 'alternating'],
+                            choices=['disabled', 'constant', 'alternating', 'backbone-only'],
                             default='alternating',
                             type=str)
         parser.add_argument('--rl-loss-function',
@@ -566,6 +566,8 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
 
     @property
     def is_rl_training_enabled(self):
+        if self.backbone_training_type == 'backbone-only':
+            return False
         if self.freeze_backbone_epochs > self.current_epoch:
             return True
         if self.backbone_training_type == 'alternating':
@@ -578,7 +580,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
             return False
         if self.backbone_training_type == 'disabled':
             return False
-        elif self.backbone_training_type == 'constant':
+        elif self.backbone_training_type == 'constant' or self.backbone_training_type == 'backbone-only':
             return True
         elif self.backbone_training_type == 'alternating':
             return self.current_epoch % 2 == 1
