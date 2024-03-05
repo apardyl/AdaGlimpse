@@ -42,7 +42,8 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                  rl_loss_function: str = 'smooth_l1', glimpse_size_penalty: float = 0., reward_type='diff',
                  early_stop_threshold=None, extract_latent_layer=None, rl_target_entropy=None,
                  teacher_type=None, teacher_path=None, pretraining=False, pretrained_checkpoint=None,
-                 exclude_rl_inputs=None, teacher_pretraining=False, backbone_decay=1e-4, fixed_scale=None, **_) -> None:
+                 exclude_rl_inputs=None, teacher_pretraining=False, backbone_decay=1e-4, fixed_scale=None,
+                 freeze_encoder=False, **_) -> None:
         super().__init__()
 
         self.steps_per_epoch = None
@@ -86,6 +87,9 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                              decoder_type=self.decoder_type)
             # noinspection PyTypeChecker
             self.mae: MaskedAutoencoderViT = torch.compile(self.mae, mode='reduce-overhead')
+
+        if freeze_encoder:
+            self.mae.freeze_encoder()
 
         self.actor_critic = ActorCritic(embed_dim=self.mae.patch_embed.embed_dim if self.mae is not None else 1,
                                         patch_num=self.num_glimpses * (self.glimpse_grid_size ** 2),
@@ -268,6 +272,11 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
                             help='use fixed glimpse scale',
                             type=float,
                             default=None)
+        parser.add_argument('--freeze-encoder',
+                            help='freeze mae encoder weights',
+                            type=bool,
+                            default=False,
+                            action=argparse.BooleanOptionalAction)
         return parent_parser
 
     def configure_optimizers(self):

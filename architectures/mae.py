@@ -319,6 +319,17 @@ class MaskedAutoencoderViT(nn.Module):
         mask = mask.reshape(mask.shape[0], mask.shape[1], 1)
         return mask.detach()
 
+    def freeze_encoder(self, requires_grad=False):
+        for module in [
+            self.patch_embed,
+            self.blocks,
+            self.norm
+        ]:
+            for p in module.parameters():
+                p.requires_grad = requires_grad
+
+        self.cls_token.requires_grad = requires_grad
+
 
 def mae_vit_small_patch16_dec512d8b(**kwargs):
     model = MaskedAutoencoderViT(

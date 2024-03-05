@@ -66,7 +66,7 @@ def main():
     loggers = []
 
     if args.wandb:
-        loggers.append(WandbLogger(project='elastic_glimpse', entity="ideas_cv", name=run_name))
+        loggers.append(WandbLogger(project='elastic_glimpse', name=run_name))
     else:
         loggers.append(TensorBoardLogger(save_dir='logs/', name=run_name))
 
