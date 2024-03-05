@@ -73,6 +73,9 @@ class Sun360Reconstruction(BaseReconstructionDataModule):
                                                                                                scale=False))
             self.val_dataset = ReconstructionDataset(file_list=val_list,
                                                      transform=get_default_img_transform(self.image_size))
+        elif stage == 'test':
+            self.test_dataset = ReconstructionDataset(file_list=val_list,
+                                                     transform=get_default_img_transform(self.image_size))
         else:
             raise NotImplemented()
 

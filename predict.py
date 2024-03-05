@@ -30,7 +30,7 @@ def define_args(parent_parser):
         "--visualization-path",
         help="path to save visualizations to",
         type=str,
-        default="visualizations",
+        default=None,
     )
     parser.add_argument(
         "--model-checkpoint",
@@ -51,11 +51,45 @@ def define_args(parent_parser):
         default=False,
         action=argparse.BooleanOptionalAction
     )
+    parser.add_argument(
+        "--dump-avg-state",
+        help='dump average state values',
+        type=bool,
+        default=False,
+        action=argparse.BooleanOptionalAction
+    )
+    parser.add_argument(
+        "--replace-state",
+        help='replace state element with value from file',
+        type=str,
+        default=None,
+        choices=['patches', 'coords', 'importance', 'latent']
+    )
     return parent_parser
 
 
+class RLStateReplaceHook:
+    def __init__(self, avg_patch=None, avg_coords=None, avg_importance=None, avg_latent=None):
+        self.avg_patch = avg_patch
+        self.avg_coords = avg_coords
+        self.avg_importance = avg_importance
+        self.avg_latent = avg_latent
+
+    def __call__(self, env_state: SharedMemory, out, score, attention, observation, next_state):
+        if self.avg_patch is not None:
+            next_state['patches'][:, :] = self.avg_patch.unsqueeze(0).unsqueeze(0)
+        if self.avg_coords is not None:
+            next_state['coords'][:, :] = self.avg_coords.unsqueeze(0).unsqueeze(0)
+        if self.avg_importance is not None:
+            next_state['attention'][:, :] = self.avg_importance.unsqueeze(0).unsqueeze(0)
+        if self.avg_latent is not None:
+            next_state['observation'][:, :] = self.avg_latent.unsqueeze(0).unsqueeze(0)
+
+
 class RLUserHook:
-    def __init__(self):
+    def __init__(self, avg_latent=False):
+        self.avg_latent = avg_latent
+
         self.images = []
         self.latent = []
         self.out = []
@@ -67,11 +101,15 @@ class RLUserHook:
         self.targets = []
         self.done = []
         self.current_done = []
+        self.importance = []
+        self.current_importance = []
+        self.latent = None
 
-    def __call__(self, env_state: SharedMemory, out, score):
+    def __call__(self, env_state: SharedMemory, out, score, attention, observation, next_state):
         self.current_out.append(out.clone().detach().cpu())
         self.current_scores.append(score.clone().detach().cpu())
         self.current_done.append(env_state.done.clone().detach().cpu())
+        self.current_importance.append(attention.clone().detach().cpu())
 
         if env_state.is_done:
             self.images.append(env_state.images.clone().detach().cpu())
@@ -84,6 +122,13 @@ class RLUserHook:
             self.targets.append(env_state.target.clone().detach().cpu())
             self.done.append(torch.stack(self.current_done, dim=1))
             self.current_done = []
+            self.importance.append(torch.stack(self.current_importance, dim=1))
+            self.current_importance = []
+            if self.avg_latent:
+                if self.latent is None:
+                    self.latent = observation.clone().detach().cpu().mean(dim=0).mean(dim=0)
+                else:
+                    self.latent += observation.clone().detach().cpu().mean(dim=0).mean(dim=0)
 
     def compute(self):
         return {
@@ -93,7 +138,9 @@ class RLUserHook:
             "coords": torch.cat(self.coords, dim=0),
             "patches": torch.cat(self.patches, dim=0),
             "targets": torch.cat(self.targets, dim=0),
-            "done": torch.cat(self.done, dim=0)
+            "done": torch.cat(self.done, dim=0),
+            "importance": torch.cat(self.importance, dim=0),
+            "latent": self.latent / len(self.done) if self.latent is not None else None
         }
 
 
@@ -298,8 +345,8 @@ def visualize_one(model: BaseRlMAE, image: Tensor, out: Tensor, coords: Tensor, 
         save_grid(grid, save_path)
 
 
-def visualize(visualization_path, model, save_all=False):
-    data = model.user_forward_hook.compute()
+def visualize(visualization_path, data_hook, model, save_all=False):
+    data = data_hook.compute()
 
     rev_normalizer = RevNormalizer()
     images = rev_normalizer(data["images"]).to(torch.uint8)
@@ -310,6 +357,20 @@ def visualize(visualization_path, model, save_all=False):
             total=images.shape[0])):
         visualize_one(model, img, out, coord, patch, score, target, done,
                       os.path.join(visualization_path, f"{idx}.png"), rev_normalizer, save_all)
+
+
+def dump_avg_state(data_hook):
+    data = data_hook.compute()
+    avg_patch = data["patches"].mean(dim=0).mean(dim=0)
+    avg_coords = data["coords"].mean(dim=0).mean(dim=0)
+    avg_importance = data["importance"][-1].mean(dim=0).mean(dim=0)
+    avg_latent = data["latent"].mean(dim=0).mean(dim=0)
+    torch.save({
+        "avg_patch": avg_patch,
+        "avg_coords": avg_coords,
+        "avg_importance": avg_importance,
+        "avg_latent": avg_latent
+    }, 'avg_state.pck')
 
 
 def main():
@@ -323,20 +384,37 @@ def main():
 
     model.load_pretrained(args.model_checkpoint)
 
-    visualization_path = args.visualization_path
-    os.makedirs(visualization_path, exist_ok=True)
-
     model.eval()
 
-    if isinstance(model, BaseRlMAE):
-        model.user_forward_hook = RLUserHook()
-    else:
+    if not isinstance(model, BaseRlMAE):
         raise RuntimeError(f"Unrecognized model type: {type(model)}")
+
+    data_hook = None
+    if args.visualization_path is not None or args.dump_avg_state:
+        data_hook = model.add_user_forward_hook(RLUserHook(avg_latent=args.dump_avg_state))
+
+    if args.replace_state is not None:
+        avg_state = torch.load('avg_state.pck')
+        replacement = {
+            'patches': 'avg_patch',
+            'coords': 'avg_coords',
+            'importance': 'avg_importance',
+            'latent': 'avg_latent'
+        }[args.replace_state]
+        model.add_user_forward_hook(RLStateReplaceHook(**{replacement: avg_state[replacement]}))
 
     trainer = Trainer()
     trainer.test(model)
 
-    visualize(visualization_path, model, save_all=args.save_all)
+    if args.dump_avg_state:
+        dump_avg_state(data_hook)
+        return
+
+    if args.visualization_path is not None:
+        visualization_path = args.visualization_path
+        os.makedirs(visualization_path, exist_ok=True)
+        visualize(visualization_path, data_hook, model, save_all=args.save_all)
+        return
 
 
 if __name__ == "__main__":

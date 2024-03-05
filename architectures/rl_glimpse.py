@@ -120,7 +120,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         self.distillation_targets = [None] * max(self.parallel_games, 1)
 
         self.save_hyperparameters(ignore=['datamodule'])
-        self._user_forward_hook = None
+        self._user_forward_hooks = []
 
         self.real_train_step = 0
 
@@ -541,7 +541,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
             'patches': env_state.all_patches.clone()
         }, batch_size=observation.shape[0])
 
-        self.call_user_forward_hook(env_state, out, score)
+        self.call_user_forward_hooks(env_state, out, score, attention, observation, next_state)
 
         return next_state, step, loss
 
@@ -754,22 +754,15 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
     def test_step(self, batch, batch_idx):
         self.inference_step(batch, batch_idx, 'test')
 
-    @property
-    def user_forward_hook(self):
-        return self._user_forward_hook
+    def add_user_forward_hook(self, hook):
+        self._user_forward_hooks.append(hook)
+        return hook
 
-    @user_forward_hook.setter
-    def user_forward_hook(self, hook):
-        self._user_forward_hook = hook
-
-    @user_forward_hook.deleter
-    def user_forward_hook(self):
-        self._user_forward_hook = None
-
-    def call_user_forward_hook(self, *args, **kwargs):
-        if self._user_forward_hook:
+    def call_user_forward_hooks(self, *args, **kwargs):
+        if self._user_forward_hooks:
             with torch.no_grad():
-                self._user_forward_hook(*args, **kwargs)
+                for hook in self._user_forward_hooks:
+                    hook(*args, **kwargs)
 
     def _restore_rl(self, state_dict):
         rl_state_dict = filter_checkpoint(state_dict, 'rl_loss_module.')
