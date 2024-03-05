@@ -381,14 +381,13 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
 
     def load_teacher(self, path):
         checkpoint = torch.load(path, map_location='cpu')
-        if self.teacher_type == 'deeplab':
-            print(self.teacher_model.load_state_dict(
-                filter_checkpoint(checkpoint['state_dict'], 'teacher_model.'), strict=False),
-                file=sys.stderr)
-        elif self.teacher_type == 'vit':
-            print(self.teacher_model.load_state_dict(checkpoint['model'], strict=False), file=sys.stderr)
+        if 'state_dict' in checkpoint:
+            checkpoint = filter_checkpoint(checkpoint['state_dict'], 'teacher_model.')
+        elif 'model' in checkpoint:
+            checkpoint = checkpoint['model']
         else:
-            raise NotImplementedError()
+            assert False, 'invalid teacher checkpoint'
+        print(self.teacher_model.load_state_dict(checkpoint, strict=False), file=sys.stderr)
 
     @staticmethod
     def _copy_target_tensor_fn(target: torch.Tensor, batch: Dict[str, torch.Tensor]):
@@ -682,7 +681,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
             else:
                 next_action = self.forward_action(next_state, exploration_type=ExplorationType.RANDOM)
             if self.fixed_scale is not None:
-                next_action[..., 3] = self.fixed_scale
+                next_action[..., 2].fill_(float(self.fixed_scale))
             next_state['action'] = next_action
             env_state.action = next_action.detach()
 
