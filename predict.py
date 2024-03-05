@@ -10,6 +10,7 @@ import torch
 import torchvision.datasets
 from lightning import Trainer
 from matplotlib import pyplot as plt
+from skimage.color import label2rgb
 from torch import Tensor
 from torchvision.transforms.v2.functional import resize
 from tqdm import tqdm
@@ -204,6 +205,25 @@ class ImageGridField(GridField):
         plt.imsave(path, self.data)
 
 
+class SegmentationGridField(GridField):
+    size_ratio = 3.5
+
+    def __init__(self, data):
+        super().__init__(data)
+
+        if len(self.data.shape) == 3:
+            self.data = self.data.argmax(dim=0)
+
+        self.data = label2rgb(self.data.numpy(), bg_label=255, bg_color=(0, 0, 0))
+
+    def render(self, axs):
+        axs.imshow(self.data, resample=False)
+        axs.set(xticklabels=[], yticklabels=[], xticks=[], yticks=[])
+
+    def save(self, path):
+        plt.imsave(path, self.data)
+
+
 class ScoreGridField(GridField):
     def render(self, axs):
         axs.set_axis_off()
@@ -306,6 +326,9 @@ def visualize_one(model: BaseRlMAE, image: Tensor, out: Tensor, coords: Tensor, 
         # classification
         pred_field = ClsPredictionGridField
         target_field = ClsTargetGridField
+    elif len(out.shape) == 4:
+        pred_field = SegmentationGridField
+        target_field = SegmentationGridField
 
     else:
         raise NotImplementedError()

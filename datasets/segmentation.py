@@ -59,5 +59,6 @@ class ADE20KSegmentation(BaseSegmentationDataModule):
             self.val_dataset = ADESegmentationDataset(self.data_dir, "validation", self.classes_start, self.num_classes,
                                                       transform=get_seg_transforms(self.image_size))
         elif stage == 'test':
-            raise RuntimeError("There is no labeled test set for ADE20K")
-
+            self.test_dataset = ADESegmentationDataset(self.data_dir, "validation", self.classes_start,
+                                                       self.num_classes,
+                                                       transform=get_seg_transforms(self.image_size))

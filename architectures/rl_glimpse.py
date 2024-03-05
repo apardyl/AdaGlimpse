@@ -147,6 +147,9 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         if pretrained_checkpoint is not None:
             self.load_pretrained(pretrained_checkpoint)
 
+        if self.backbone_training_type == 'backbone-only' and not freeze_encoder:
+            print('Backbone-only mode should be only used with frozen encoder!')
+
     @classmethod
     def add_argparse_args(cls, parent_parser):
         parser = parent_parser.add_argument_group(BaseRlMAE.__name__)
