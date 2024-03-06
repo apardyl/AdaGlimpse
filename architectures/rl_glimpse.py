@@ -579,11 +579,13 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
 
     @property
     def is_backbone_training_enabled(self):
+        if self.backbone_training_type == 'backbone-only':
+            return True
         if self.freeze_backbone_epochs > self.current_epoch:
             return False
         if self.backbone_training_type == 'disabled':
             return False
-        elif self.backbone_training_type == 'constant' or self.backbone_training_type == 'backbone-only':
+        elif self.backbone_training_type == 'constant':
             return True
         elif self.backbone_training_type == 'alternating':
             return self.current_epoch % 2 == 1

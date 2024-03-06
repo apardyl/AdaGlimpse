@@ -268,7 +268,7 @@ def show_grid(grid: List[List[Optional[GridField]]], name):
 def save_grid(grid: List[List[Optional[GridField]]], path):
     for x, col in enumerate(grid):
         for y, field in enumerate(col):
-            if field is not None and isinstance(field, ImageGridField):
+            if field is not None and (isinstance(field, ImageGridField) or isinstance(field, SegmentationGridField)):
                 field.save(path.replace('.png', f'_{x}_{y}.png'))
 
 
