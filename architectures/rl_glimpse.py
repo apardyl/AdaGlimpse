@@ -637,7 +637,7 @@ class BaseRlMAE(AutoconfigLightningModule, MetricMixin, ABC):
         optimizer_backbone.zero_grad()
         self.manual_backward(backbone_loss)
         optimizer_backbone.step()
-        self.log(name='train/backbone_loss', value=backbone_loss.mean().item(), on_step=True, on_epoch=False)
+        self.log(name='train/backbone_loss', value=backbone_loss.mean().item(), on_step=True, on_epoch=True)
 
     @torch.inference_mode()
     def teacher_step(self, images: torch.Tensor, game_idx: int):
