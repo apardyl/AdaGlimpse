@@ -1,5 +1,5 @@
 # AdaGlimpse: Active Visual Exploration with Arbitrary Glimpse Position and Scale (ECCV 2024)
-### [Project Page](https://io.pardyl.com/AdaGlimpse/) | [Paper](https://arxiv.org/abs/2404.03482)
+### [Project Page](https://io.pardyl.com/AdaGlimpse/) | [Paper](https://arxiv.org/abs/2404.03482) | [Checkpoints](https://huggingface.co/apardyl/AdaGlimpse/tree/main)
 Official PyTorch implementation of the paper: "AdaGlimpse: Active Visual Exploration with Arbitrary Glimpse Position and Scale"
 
 ![](https://io.pardyl.com/AdaGlimpse/static/images/preview.gif)
@@ -58,3 +58,6 @@ Run `python train.py <dataset> <model> --help` for available training params.
 
 Visualizations form the paper can be generated using `predict.py` 
 (use `--help` param for more information).
+
+## Trained models
+Training checkpoints can be downloaded from Hugging Face: [https://huggingface.co/apardyl/AdaGlimpse](https://huggingface.co/apardyl/AdaGlimpse/tree/main)
