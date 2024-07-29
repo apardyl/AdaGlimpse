@@ -2,23 +2,17 @@ import argparse
 import os.path
 import random
 import sys
-from dataclasses import dataclass
-from operator import itemgetter
-from typing import Optional, List
 
 import torch
-import torchvision.datasets
 from lightning import Trainer
-from matplotlib import pyplot as plt
-from skimage.color import label2rgb
-from torch import Tensor
-from torchvision.transforms.v2.functional import resize
 from tqdm import tqdm
 
-from architectures.rl.shared_memory import SharedMemory
 from architectures.rl_glimpse import BaseRlMAE
 from architectures.utils import RevNormalizer
+from utils.prediction_hooks import RLStateReplaceHook, RLUserHook
 from utils.prepare import experiment_from_args
+from utils.visualisation_animate import animate_one
+from utils.visualisation_grid import visualize_grid
 
 random.seed(1)
 torch.manual_seed(1)
@@ -32,6 +26,13 @@ def define_args(parent_parser):
         help="path to save visualizations to",
         type=str,
         default=None,
+    )
+    parser.add_argument(
+        "--animate",
+        help="animate visualizations",
+        type=bool,
+        default=False,
+        action=argparse.BooleanOptionalAction
     )
     parser.add_argument(
         "--model-checkpoint",
@@ -69,306 +70,7 @@ def define_args(parent_parser):
     return parent_parser
 
 
-class RLStateReplaceHook:
-    def __init__(self, avg_patch=None, avg_coords=None, avg_importance=None, avg_latent=None):
-        self.avg_patch = avg_patch
-        self.avg_coords = avg_coords
-        self.avg_importance = avg_importance
-        self.avg_latent = avg_latent
-
-    def __call__(self, env_state: SharedMemory, out, score, attention, observation, next_state):
-        if self.avg_patch is not None:
-            next_state['patches'][:, :] = self.avg_patch.unsqueeze(0).unsqueeze(0)
-        if self.avg_coords is not None:
-            next_state['coords'][:, :] = self.avg_coords.unsqueeze(0).unsqueeze(0)
-        if self.avg_importance is not None:
-            next_state['attention'][:, :] = self.avg_importance.unsqueeze(0).unsqueeze(0)
-        if self.avg_latent is not None:
-            next_state['observation'][:, :] = self.avg_latent.unsqueeze(0).unsqueeze(0)
-
-
-class RLUserHook:
-    def __init__(self, avg_latent=False):
-        self.avg_latent = avg_latent
-
-        self.images = []
-        self.latent = []
-        self.out = []
-        self.scores = []
-        self.coords = []
-        self.patches = []
-        self.current_out = []
-        self.current_scores = []
-        self.targets = []
-        self.done = []
-        self.current_done = []
-        self.importance = []
-        self.current_importance = []
-        self.latent = None
-
-    def __call__(self, env_state: SharedMemory, out, score, attention, observation, next_state):
-        self.current_out.append(out.clone().detach().cpu())
-        self.current_scores.append(score.clone().detach().cpu())
-        self.current_done.append(env_state.done.clone().detach().cpu())
-        self.current_importance.append(attention.clone().detach().cpu())
-
-        if env_state.is_done:
-            self.images.append(env_state.images.clone().detach().cpu())
-            self.coords.append(env_state.current_coords.clone().detach().cpu())
-            self.patches.append(env_state.current_patches.clone().detach().cpu())
-            self.out.append(torch.stack(self.current_out, dim=1))
-            self.current_out = []
-            self.scores.append(torch.stack(self.current_scores, dim=1))
-            self.current_scores = []
-            self.targets.append(env_state.target.clone().detach().cpu())
-            self.done.append(torch.stack(self.current_done, dim=1))
-            self.current_done = []
-            self.importance.append(torch.stack(self.current_importance, dim=1))
-            self.current_importance = []
-            if self.avg_latent:
-                if self.latent is None:
-                    self.latent = observation.clone().detach().cpu().mean(dim=0).mean(dim=0)
-                else:
-                    self.latent += observation.clone().detach().cpu().mean(dim=0).mean(dim=0)
-
-    def compute(self):
-        return {
-            "images": torch.cat(self.images, dim=0),
-            "out": torch.cat(self.out, dim=0),
-            "scores": torch.cat(self.scores, dim=0),
-            "coords": torch.cat(self.coords, dim=0),
-            "patches": torch.cat(self.patches, dim=0),
-            "targets": torch.cat(self.targets, dim=0),
-            "done": torch.cat(self.done, dim=0),
-            "importance": torch.cat(self.importance, dim=0),
-            "latent": self.latent / len(self.done) if self.latent is not None else None
-        }
-
-
-@dataclass
-class Coords:
-    y1: int
-    x1: int
-    y2: int
-    x2: int
-
-    @classmethod
-    def from_tensor(cls, x):
-        x = x.squeeze()
-        assert len(x.shape) == 1 and x.shape[0] == 4
-        return cls(int(x[0]), int(x[1]), int(x[2]), int(x[3]))
-
-    def bbox(self):
-        return self.x1, self.y1, self.x2, self.y2
-
-    @classmethod
-    def merge(cls, coords: List['Coords']):
-        return Coords(
-            min(c.y1 for c in coords),
-            min(c.x1 for c in coords),
-            max(c.y2 for c in coords),
-            max(c.x2 for c in coords)
-        )
-
-    def area(self):
-        return (self.x2 - self.x1) * (self.y2 - self.y1)
-
-    def __lt__(self, other):
-        return self.area() < other.area()
-
-
-class GridField:
-    size_ratio = .3
-
-    def __init__(self, data):
-        self.data = data
-
-    def render(self, axs):
-        raise NotImplementedError()
-
-
-class ImageGridField(GridField):
-    size_ratio = 3.5
-
-    def __init__(self, data):
-        super().__init__(data)
-        if len(self.data.shape) == 3:
-            if self.data.shape[0] == 3:
-                self.data = self.data.permute((1, 2, 0))
-                self.data = self.data.numpy()
-
-    def render(self, axs):
-        axs.imshow(self.data, resample=False)
-        axs.set(xticklabels=[], yticklabels=[], xticks=[], yticks=[])
-
-    def save(self, path):
-        plt.imsave(path, self.data)
-
-
-class SegmentationGridField(GridField):
-    size_ratio = 3.5
-
-    def __init__(self, data):
-        super().__init__(data)
-
-        if len(self.data.shape) == 3:
-            self.data = self.data.argmax(dim=0)
-
-        self.data = label2rgb(self.data.numpy(), bg_label=255, bg_color=(0, 0, 0))
-
-    def render(self, axs):
-        axs.imshow(self.data, resample=False)
-        axs.set(xticklabels=[], yticklabels=[], xticks=[], yticks=[])
-
-    def save(self, path):
-        plt.imsave(path, self.data)
-
-
-class ScoreGridField(GridField):
-    def render(self, axs):
-        axs.set_axis_off()
-        axs.text(0.15, 0.4, f'Score: {float(self.data):.3f}', font={'size': 18})
-
-
-class ClsPredictionGridField(GridField):
-    def render(self, axs):
-        self.data = torch.nn.functional.softmax(self.data, dim=-1)
-        pred = torch.argmax(self.data, dim=-1)
-        score = self.data[pred]
-        axs.set_axis_off()
-        axs.text(0.15, 0.3, f'Pred: {int(pred)}\nProb: {float(score):.3f}', font={'size': 18})
-
-
-class ClsTargetGridField(GridField):
-    def render(self, axs):
-        axs.set_axis_off()
-        axs.text(0.15, 0.4, f'Label: {int(self.data)}', font={'size': 18})
-
-
-def show_grid(grid: List[List[Optional[GridField]]], name):
-    rows = len(grid[0])
-    columns = len(grid)
-    size = 3
-    height_ratios = [row.size_ratio for row in grid[-1]]
-    fig, axs = plt.subplots(
-        figsize=(columns * size, sum(height_ratios)), ncols=columns, nrows=rows, squeeze=False,
-        height_ratios=height_ratios
-    )
-    for x, col in enumerate(grid):
-        for y, field in enumerate(col):
-            if field is not None:
-                field.render(axs[y, x])
-            else:
-                axs[y, x].set_axis_off()
-    plt.tight_layout()
-    plt.savefig(name)
-    plt.close(fig)
-
-
-def save_grid(grid: List[List[Optional[GridField]]], path):
-    for x, col in enumerate(grid):
-        for y, field in enumerate(col):
-            if field is not None and (isinstance(field, ImageGridField) or isinstance(field, SegmentationGridField)):
-                field.save(path.replace('.png', f'_{x}_{y}.png'))
-
-
-def glimpse_map(patches, coords: List[Coords], output_shape):
-    img = torch.zeros(output_shape, dtype=torch.uint8)
-    for coord, patch in sorted([(coord, patch) for patch, coord in zip(patches, coords)], key=itemgetter(0),
-                               reverse=True):
-        coord: Coords
-        patch = resize(
-            patch, [coord.y2 - coord.y1, coord.x2 - coord.x1],
-            interpolation=torchvision.transforms.InterpolationMode.NEAREST)
-        img[:, coord.y1: coord.y2, coord.x1: coord.x2] = patch
-    return img
-
-
-def bbox_map(img, coords, merged_coords):
-    boxes = torch.tensor(
-        [c.bbox() for c in coords],
-        dtype=torch.float,
-    )
-    merged_boxes = torch.tensor(
-        [c.bbox() for c in merged_coords],
-        dtype=torch.float,
-    )
-    boxes_per_glimpse = (len(coords) // len(merged_coords))
-    colors = ["black"] * (len(coords) - boxes_per_glimpse) + ["red"] * boxes_per_glimpse
-    merged_colors = ["black"] * (len(merged_coords) - 1) + ["red"]
-    img = torchvision.utils.draw_bounding_boxes(img, boxes, colors=colors, width=1)
-    img = torchvision.utils.draw_bounding_boxes(img, merged_boxes, colors=merged_colors, width=3)
-    return img
-
-
-def selection_map(mask, patch_size):
-    while len(mask.shape) > 2:
-        mask = mask.squeeze(0)
-    mask = mask.detach().cpu().numpy()
-    mask = mask.repeat(patch_size[1], axis=1).repeat(patch_size[0], axis=0)
-    return torch.from_numpy(mask).unsqueeze(0)
-
-
-def visualize_one(model: BaseRlMAE, image: Tensor, out: Tensor, coords: Tensor, patches: Tensor, scores: Tensor,
-                  target: Tensor, done: Tensor, save_path: str, rev_normalizer, save_all: bool) -> None:
-    num_glimpses = model.num_glimpses
-    patches_per_glimpse = coords.shape[0] // num_glimpses
-    assert patches_per_glimpse * num_glimpses == coords.shape[0]  # assert if divisible by num_glimpses
-
-    if len(out.shape) == 3:
-        # reconstruction
-        out = model.mae.unpatchify(out)
-        out = rev_normalizer(out).to(torch.uint8)
-
-        pred_field = ImageGridField
-        target_field = None
-    elif len(out.shape) == 2:
-        # classification
-        pred_field = ClsPredictionGridField
-        target_field = ClsTargetGridField
-    elif len(out.shape) == 4:
-        pred_field = SegmentationGridField
-        target_field = SegmentationGridField
-
-    else:
-        raise NotImplementedError()
-
-    grid: List[List[Optional[GridField]]] = [
-        [
-            ImageGridField(image),
-            None,
-            pred_field(out[0])
-        ]
-        + ([target_field(target)] if target_field is not None else [])
-        + [ScoreGridField(scores[0])]
-    ]
-
-    coords = [Coords.from_tensor(x) for x in coords]
-    merged_coords = [Coords.merge(coords[idx * patches_per_glimpse: idx * patches_per_glimpse + patches_per_glimpse])
-                     for idx in range(num_glimpses)]
-
-    for glimpse_idx in range(model.num_glimpses):
-        if done[glimpse_idx]:
-            continue
-        start_idx = glimpse_idx * patches_per_glimpse
-        end_idx = start_idx + patches_per_glimpse
-
-        grid.append(
-            [
-                ImageGridField(bbox_map(image, coords[:end_idx], merged_coords[:glimpse_idx + 1])),
-                ImageGridField(glimpse_map(patches, coords[:end_idx], image.shape)),
-                pred_field(out[glimpse_idx + 1])
-            ]
-            + ([target_field(target)] if target_field is not None else [])
-            + [ScoreGridField(scores[glimpse_idx + 1])]
-        )
-
-    show_grid(grid, save_path)
-    if save_all:
-        save_grid(grid, save_path)
-
-
-def visualize(visualization_path, data_hook, model, save_all=False):
+def visualize(visualization_path, data_hook, model, save_all=False, animate=False):
     data = data_hook.compute()
 
     rev_normalizer = RevNormalizer()
@@ -378,8 +80,12 @@ def visualize(visualization_path, data_hook, model, save_all=False):
     for idx, (img, out, coord, patch, score, target, done) in enumerate(tqdm(
             zip(images, data["out"], data["coords"], patches, data['scores'], data['targets'], data['done']),
             total=images.shape[0])):
-        visualize_one(model, img, out, coord, patch, score, target, done,
-                      os.path.join(visualization_path, f"{idx}.png"), rev_normalizer, save_all)
+        if animate:
+            animate_one(model, img, out, coord, patch, score, target, done,
+                        os.path.join(visualization_path, f"{idx}.mp4"), rev_normalizer)
+        else:
+            visualize_grid(model, img, out, coord, patch, score, target, done,
+                           os.path.join(visualization_path, f"{idx}.png"), rev_normalizer, save_all)
 
 
 def dump_avg_state(data_hook):
@@ -436,7 +142,7 @@ def main():
     if args.visualization_path is not None:
         visualization_path = args.visualization_path
         os.makedirs(visualization_path, exist_ok=True)
-        visualize(visualization_path, data_hook, model, save_all=args.save_all)
+        visualize(visualization_path, data_hook, model, save_all=args.save_all, animate=args.animate)
         return
 
 
