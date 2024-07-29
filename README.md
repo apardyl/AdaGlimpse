@@ -60,4 +60,5 @@ Visualizations form the paper can be generated using `predict.py`
 (use `--help` param for more information).
 
 ## Trained models
-Training checkpoints can be downloaded from Hugging Face: [https://huggingface.co/apardyl/AdaGlimpse](https://huggingface.co/apardyl/AdaGlimpse/tree/main)
+* AdaGlimpse final training checkpoints can be downloaded from: [https://huggingface.co/apardyl/AdaGlimpse](https://huggingface.co/apardyl/AdaGlimpse/tree/main)
+* Pre-trained ViT backbone model for ImageNet-1k for training AdaGlimpse can be found at: [https://huggingface.co/apardyl/BeyondGrids/blob/main/base_224.pth](https://huggingface.co/apardyl/BeyondGrids/blob/main/base_224.pth)
