@@ -167,6 +167,11 @@ def animate_one(model: BaseRlMAE, image: Tensor, out: Tensor, coords: Tensor, pa
             draw_frame(ax, FrameEnum(len(FrameEnum) - 3 + step_idx), image, None, glimpse_grid_size, [], out[0:1],
                        merged_coords[0:1])
             return
+        if step_idx >= 2 + num_glimpses * len(FrameEnum):
+            draw_frame(ax, FrameEnum.PREDICTION, image, merged_coords[-1], glimpse_grid_size, merged_coords,
+                       out[-2:], merged_coords[-1:])
+            return
+
         glimpse_idx = (step_idx - 3) // len(FrameEnum)
         stage = FrameEnum((step_idx - 3) % len(FrameEnum))
         draw_frame(ax, stage, image, merged_coords[glimpse_idx], glimpse_grid_size, merged_coords[:glimpse_idx + 1],
@@ -174,6 +179,6 @@ def animate_one(model: BaseRlMAE, image: Tensor, out: Tensor, coords: Tensor, pa
 
     max_steps = sum(not x for x in done)
     # noinspection PyTypeChecker
-    anim = animation.FuncAnimation(fig, update_fig, max_steps * len(FrameEnum) + 3)
+    anim = animation.FuncAnimation(fig, update_fig, max_steps * len(FrameEnum) + 8)
     anim.save(save_path, fps=1, savefig_kwargs={'pad_inches': 0})
     plt.close(fig)
