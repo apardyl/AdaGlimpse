@@ -49,16 +49,27 @@ and the model is:
 * SegmentationRlMAE for segmentation
 
 Example:
-Run ReconstructionRlMAE on Elastic ImageNet1k with reconstruction task
+Run reconstruction task on ImageNet-1k:
 ```shell
-python train.py ImageNet1k  ReconstructionRlMAE --data-dir DATASET_DIR
+python train.py ImageNet1k  ReconstructionRlMAE --data-dir DATASET_DIR --train-batch-size 128 --eval-batch-size 128 --rl-batch-size 128  --num-workers 8 --parallel-games 2 --num-glimpses 12
 ```
----
-Run `python train.py <dataset> <model> --help` for available training params.
 
-Visualizations form the paper can be generated using `predict.py` 
+Run classification task on ImageNet-1k:
+```shell
+python train.py ImageNet1k ClassificationRlMAE --data-dir $DATASET_DIR --wandb --train-batch-size 256 --eval-batch-size 256 --rl-batch-size 256  --num-workers 8 --parallel-games 2 --num-glimpses 14 --pretrained-mae-path elastic_base.pth --teacher-type vit --teacher-path deit_3_base_224_21k.pth
+```
+
+Batch size should be adjusted to fit the available GPU memory, the above examples assume NVIDIA A100 GPUs.
+
+Training takes a long time, for ImageNet-1k tasks it takes around 1 week on 4x A100 GPUs.
+
+---
+Run `python train.py <dataset> <model> --help` for all available training params.
+
+Visualizations form the paper and website can be generated using `predict.py` 
 (use `--help` param for more information).
 
 ## Trained models
 * AdaGlimpse final training checkpoints can be downloaded from: [https://huggingface.co/apardyl/AdaGlimpse](https://huggingface.co/apardyl/AdaGlimpse/tree/main)
 * Pre-trained ViT backbone model for ImageNet-1k for training AdaGlimpse can be found at: [https://huggingface.co/apardyl/BeyondGrids/blob/main/base_224.pth](https://huggingface.co/apardyl/BeyondGrids/blob/main/base_224.pth)
+* ViT teacher model for ImageNet-1k classification: [https://dl.fbaipublicfiles.com/deit/deit_3_base_224_21k.pth](https://dl.fbaipublicfiles.com/deit/deit_3_base_224_21k.pth)
